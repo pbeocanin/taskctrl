@@ -1,0 +1,12 @@
+# board data and local setup stay local — the repo ships code only
+tasks.json
+tasks.json.*
+images/
+config.json
+
+# runtime junk
+server.log
+nohup.out
+__pycache__/
+*.bak
+*.tmp
