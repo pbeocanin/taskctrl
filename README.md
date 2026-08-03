@@ -25,10 +25,18 @@ write call-ready notes when it ships.
 - **Single file** — server, REST API, and the whole frontend live in `server.py`
 - **JSON storage** — `tasks.json` next to the server; re-read on every request, so
   direct edits show up without a restart. The page polls every 15s.
-- **Task anatomy** — title, reasoning ("why does this exist"), **subtasks** (markdown
-  checklist rendered as live checkboxes), markdown **notes**, status
-  (`todo`/`doing`/`done`), category, type (`feature`/`bug`/`chore`), priority
-  (`high`/`normal`/`low`), image attachments (paste/drag-drop/upload)
+- **Task anatomy** — title, reasoning ("why does this exist"), **subtasks** (first-class
+  items with their own optional reasoning and timestamps — add/edit/remove/check them
+  in the task view), markdown **notes**, status (`todo`/`doing`/`done`), category,
+  type (`feature`/`bug`/`chore`), priority (`high`/`normal`/`low`), image attachments
+  (paste/drag-drop/upload)
+- **Completion timestamps** — the server stamps `completed_at` on tasks and subtasks
+  the moment they're closed (and clears it if reopened), so "when did this actually
+  finish" is real data, not a guess from `updated_at`
+- **Today view** — one click shows everything closed today: tasks completed today plus
+  tasks where subtasks were checked off today
+- **Archive** — retire a task from the board without deleting it; archived tasks live
+  only in the Archived view and keep their full history
 - **Stable task numbers** — every task gets a permanent `T01`-style number, assigned
   server-side under a lock so concurrent writers can't mint duplicates. Numbers are
   never reused or reshuffled.
@@ -39,7 +47,7 @@ write call-ready notes when it ships.
 - **The HUD** — on wide screens the filters dock as a 3D game-menu side panel:
   mouse-tracking tilt, staggered fly-in, holo sweep, breathing active glow, and a
   chromatic glitch on click. Flat filter rows below 1280px. Exclusive filters for
-  project / type / priority, persisted in localStorage.
+  project / type / priority / view (Today, Archived), persisted in localStorage.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ## Quickstart
@@ -78,18 +86,33 @@ Task shape:
   "num": 7,
   "title": "Fix the login redirect",
   "reasoning": "why this task exists",
-  "subtasks": "- [x] reproduce\n- [ ] fix",
+  "subtasks": [
+    {"id": "9f3a2b", "text": "reproduce", "reasoning": "", "done": true,
+     "created_at": "2026-07-31T12:00:00", "completed_at": "2026-07-31T12:20:00"},
+    {"id": "c41d07", "text": "fix", "reasoning": "optional — why this step",
+     "done": false, "created_at": "2026-07-31T12:00:00"}
+  ],
   "notes": "markdown — findings, mechanisms, decisions",
   "status": "todo | doing | done",
   "category": "one of the category slugs from config.json",
   "type": "feature | bug | chore (or empty)",
   "priority": "high | normal | low",
   "pinned": false,
+  "archived": false,
   "images": ["a1b2c3d4e5f6-9f3a2b.png"],
   "created_at": "2026-07-31T12:00:00",
-  "updated_at": "2026-07-31T12:34:56"
+  "updated_at": "2026-07-31T12:34:56",
+  "completed_at": "2026-07-31T12:34:56 — present only while status is done"
 }
 ```
+
+`subtasks` accepts two input formats on POST/PUT: the structured array above, or a
+markdown string of `- [ ]` / `- [x]` lines (handy for agents), which the server parses
+and matches to existing items by text. In both cases the server owns `id`,
+`created_at`, and `completed_at` — a subtask is stamped when it flips to done and
+unstamped if unchecked. Same for tasks: flipping status to `done` sets `completed_at`,
+reopening clears it. `PUT {"archived": true}` archives a task (server stamps
+`archived_at`); neither archiving nor pinning bumps `updated_at`.
 
 **Concurrent writers:** if more than one process/agent writes at once, use the API —
 it's the only path that serializes number assignment. Hand-editing `tasks.json` is fine

@@ -68,6 +68,7 @@ def load_db():
         return {"tasks": []}
     with open(DB_PATH, "r", encoding="utf-8") as f:
         db = json.load(f)
+    changed = False
     # one-time migration: number tasks that predate the num field, by creation date
     unnumbered = [t for t in db["tasks"] if "num" not in t]
     if unnumbered:
@@ -75,6 +76,22 @@ def load_db():
         for t in sorted(unnumbered, key=lambda t: t.get("created_at", "")):
             nxt += 1
             t["num"] = nxt
+        changed = True
+    for t in db["tasks"]:
+        # one-time migrations: markdown-string subtasks → structured objects, and
+        # completed_at backfill for tasks finished before the field existed.
+        # updated_at is the closest known moment for both — approximate, not exact.
+        if isinstance(t.get("subtasks"), str):
+            t["subtasks"] = [dict(
+                {"id": new_st_id(), "text": p["text"], "reasoning": "",
+                 "done": p["done"], "created_at": t.get("created_at") or now_iso()},
+                **({"completed_at": t.get("updated_at") or now_iso()} if p["done"] else {}),
+            ) for p in parse_subtasks_md(t["subtasks"])]
+            changed = True
+        if t.get("status") == "done" and "completed_at" not in t:
+            t["completed_at"] = t.get("updated_at") or now_iso()
+            changed = True
+    if changed:
         save_db(db)
     return db
 
@@ -88,6 +105,71 @@ def save_db(db):
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def new_st_id():
+    return uuid.uuid4().hex[:6]
+
+
+def parse_subtasks_md(text):
+    """Markdown checklist / plain lines → [{text, done}] (agent-compat input)."""
+    items = []
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.fullmatch(r"[-*]\s+\[( |x|X)\]\s*(.*)", line)
+        if m:
+            txt, done = m.group(2).strip(), m.group(1).lower() == "x"
+        else:
+            txt, done = line.lstrip("-* ").strip(), False
+        if txt:
+            items.append({"text": txt, "done": done})
+    return items
+
+
+def normalize_subtasks(incoming, existing, now):
+    """Normalize a POST/PUT subtasks payload into the stored structure.
+
+    Accepts a list of dicts (the UI sends full objects) or a markdown/plain-line
+    string (agent compatibility). Surviving items keep their id, created_at,
+    reasoning, and completed_at; the server owns all timestamps — a subtask that
+    flips to done is stamped now, one that flips back loses its stamp."""
+    if isinstance(incoming, str):
+        incoming = parse_subtasks_md(incoming)
+    elif not isinstance(incoming, list):
+        return existing
+    pool = [e for e in existing if isinstance(e, dict)]
+
+    def claim(p):
+        for e in pool:
+            if p.get("id") and e.get("id") == p.get("id"):
+                pool.remove(e)
+                return e
+        for e in pool:
+            if not p.get("id") and e.get("text") == p.get("text"):
+                pool.remove(e)
+                return e
+        return None
+
+    out = []
+    for p in incoming:
+        if not isinstance(p, dict):
+            continue
+        text = str(p.get("text") or "").strip()
+        if not text:
+            continue
+        old = claim(p) or {}
+        done = bool(p.get("done", old.get("done", False)))
+        item = {
+            "id": old.get("id") or new_st_id(),
+            "text": text,
+            "reasoning": str(p.get("reasoning", old.get("reasoning", "")) or "").strip(),
+            "done": done,
+            "created_at": old.get("created_at") or now,
+        }
+        if done:
+            item["completed_at"] = (old.get("completed_at") if old.get("done") else None) or now
+        out.append(item)
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -159,21 +241,24 @@ class Handler(BaseHTTPRequestHandler):
         title = (body.get("title") or "").strip()
         if not title:
             return self._json(400, {"error": "title is required"})
+        now = now_iso()
         task = {
             "id": uuid.uuid4().hex[:12],
             "num": 0,  # assigned below under the lock
             "title": title,
             "reasoning": (body.get("reasoning") or "").strip(),
-            "subtasks": (body.get("subtasks") or "").strip(),
+            "subtasks": normalize_subtasks(body.get("subtasks") or "", [], now),
             "notes": (body.get("notes") or "").strip(),
             "status": body.get("status") if body.get("status") in STATUSES else "todo",
             "category": body.get("category") if body.get("category") in categories() else "",
             "priority": body.get("priority") if body.get("priority") in PRIORITIES else "normal",
             "type": body.get("type") if body.get("type") in TYPES else "",
             "pinned": bool(body.get("pinned")),
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
+            "created_at": now,
+            "updated_at": now,
         }
+        if task["status"] == "done":
+            task["completed_at"] = now
         with _lock:
             db = load_db()
             task["num"] = max((t.get("num", 0) for t in db["tasks"]), default=0) + 1
@@ -216,10 +301,18 @@ class Handler(BaseHTTPRequestHandler):
             task = next((t for t in db["tasks"] if t["id"] == tid), None)
             if not task:
                 return self._json(404, {"error": "no such task"})
-            for field in ("title", "reasoning", "subtasks", "notes"):
+            now = now_iso()
+            for field in ("title", "reasoning", "notes"):
                 if field in body:
                     task[field] = str(body[field]).strip()
+            if "subtasks" in body:
+                task["subtasks"] = normalize_subtasks(body["subtasks"], task.get("subtasks") or [], now)
             if body.get("status") in STATUSES:
+                # completed_at marks the todo/doing → done transition; reopening clears it
+                if body["status"] == "done" and task["status"] != "done":
+                    task["completed_at"] = now
+                elif body["status"] != "done" and task["status"] == "done":
+                    task.pop("completed_at", None)
                 task["status"] = body["status"]
             if "category" in body:
                 task["category"] = body["category"] if body["category"] in categories() else ""
@@ -229,10 +322,17 @@ class Handler(BaseHTTPRequestHandler):
                 task["type"] = body["type"] if body["type"] in TYPES else ""
             if "pinned" in body:
                 task["pinned"] = bool(body["pinned"])
+            if "archived" in body:
+                arch = bool(body["archived"])
+                if arch and not task.get("archived"):
+                    task["archived_at"] = now
+                elif not arch:
+                    task.pop("archived_at", None)
+                task["archived"] = arch
             if not task["title"]:
                 return self._json(400, {"error": "title is required"})
-            if set(body) != {"pinned"}:  # pin toggles are metadata, not work
-                task["updated_at"] = now_iso()
+            if not set(body) <= {"pinned", "archived"}:  # pin/archive toggles are metadata, not work
+                task["updated_at"] = now
             save_db(db)
         self._json(200, task)
 
@@ -520,6 +620,34 @@ PAGE = r"""<!doctype html>
   .seg button.on.normal { background: rgba(147,167,186,.15); color: var(--dim); }
   .seg button.on.low    { background: rgba(81,102,123,.2); color: var(--muted); }
 
+  /* view filter (Today / Archived) */
+  .cf.on[data-v="today"]    { color: var(--green); border-color: rgba(65,240,165,.5); background: rgba(65,240,165,.08); }
+  .cf.on[data-v="archived"] { color: var(--muted); border-color: var(--line2); background: rgba(81,102,123,.12); }
+  .row.arch { opacity: .6; }
+  .when.tdy { color: var(--green); }
+
+  /* structured subtask list */
+  .st-row { padding: 4px 0; }
+  .st-row.done .st-text { color: var(--muted); }
+  .st-main { flex: 1; min-width: 0; }
+  .st-reason { font-size: 12.5px; color: var(--muted); font-style: italic; margin-top: 1px; }
+  .st-btn {
+    border: none; background: none; padding: 2px 5px; font-size: 12px;
+    color: var(--muted); opacity: 0; transition: opacity .12s, color .12s;
+  }
+  .st-row:hover .st-btn { opacity: .8; }
+  .st-btn:hover { color: var(--cyan); box-shadow: none; }
+  .st-btn.del:hover { color: var(--red); }
+  .st-none { color: var(--muted); font-style: italic; }
+  .st-add { margin-top: 9px; }
+  .st-add input, .st-ed input {
+    width: 100%; font: 13.5px/1.5 var(--sans); color: var(--ink);
+    background: var(--bg0); border: 1px solid var(--line2); border-radius: 3px; padding: 6px 10px;
+  }
+  .st-add input:focus, .st-ed input:focus { outline: none; border-color: var(--cyan-dim); box-shadow: 0 0 8px rgba(65,216,247,.15); }
+  .st-ed { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .st-ed-btns { display: flex; gap: 6px; }
+
   /* status lamp */
   .lamp { width: 10px; height: 10px; border-radius: 50%; justify-self: center; }
   .lamp.todo  { background: var(--amber); box-shadow: 0 0 8px rgba(255,180,84,.7); }
@@ -725,6 +853,11 @@ PAGE = r"""<!doctype html>
         <button class="cf" data-f="prio" data-v="normal"><span>Normal</span></button>
         <button class="cf" data-f="prio" data-v="low"><span>Low</span></button>
       </div>
+      <div class="hud-sec"><span class="hud-lab">View</span>
+        <button class="cf" data-f="view" data-v="all"><span>All</span></button>
+        <button class="cf" data-f="view" data-v="today"><span>Today</span></button>
+        <button class="cf" data-f="view" data-v="archived"><span>Archived</span></button>
+      </div>
       <i class="hud-fx"></i>
     </div>
   </aside>
@@ -762,6 +895,7 @@ PAGE = r"""<!doctype html>
 let tasks = [];
 let modalId = null;     // task id shown in modal, '' = new task, null = closed
 let editMode = false;
+let stEdit = null;      // subtask id currently being edited inline, null = none
 
 const $ = s => document.querySelector(s);
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -773,11 +907,18 @@ const TYPE_FULL = { feature: 'Feature', bug: 'Bug', chore: 'Chore' };
 const PRIO_LABEL = { high: '▲ High', normal: 'Normal', low: '▼ Low' };
 const PRIO_RANK = { high: 0, normal: 1, low: 2 };
 const prioOf = t => PRIO_RANK[t.priority] !== undefined ? t.priority : 'normal';
+const todayStr = () => {
+  const n = new Date(), p = x => String(x).padStart(2, '0');
+  return n.getFullYear() + '-' + p(n.getMonth() + 1) + '-' + p(n.getDate());
+};
+const doneToday = t => (t.completed_at || '').slice(0, 10) === todayStr();
+const stsDoneToday = t => (t.subtasks || []).filter(s => (s.completed_at || '').slice(0, 10) === todayStr()).length;
 // exclusive filters, one per dimension, persisted individually
 const FILTER_VALS = {
   cat:  ['all', ...Object.keys(CAT_LABEL)],
   typ:  ['all', ...Object.keys(TYPE_LABEL)],
   prio: ['all', ...Object.keys(PRIO_LABEL)],
+  view: ['all', 'today', 'archived'],
 };
 const filters = {};
 for (const k of Object.keys(FILTER_VALS)) {
@@ -875,14 +1016,24 @@ async function api(method, path, body) {
 }
 
 async function refresh() {
-  if (editMode) return; // never clobber an open editor
+  if (editMode || stEdit !== null) return; // never clobber an open editor
+  const stNew = $('#st-new');
+  if (stNew && (stNew.value.trim() || document.activeElement === stNew)) return; // mid-typing a new subtask
   tasks = (await api('GET', '/api/tasks')).tasks;
   render();
 }
 
+/* structured subtasks: every change PUTs the full array; the server keeps ids,
+   creation times and completion stamps for surviving items */
+function curSt() { const t = tasks.find(x => x.id === modalId); return t ? (t.subtasks || []) : []; }
+async function putSt(list) { await api('PUT', '/api/tasks/' + modalId, { subtasks: list }); await refresh(); }
+
 /* ---------- board ---------- */
 function rowHtml(t) {
-  const { all, done } = ckStats((t.subtasks || '') + '\n' + t.notes);
+  const st = t.subtasks || [];
+  const notesCk = ckStats(t.notes || '');
+  const all = st.length + notesCk.all;
+  const done = st.filter(s => s.done).length + notesCk.done;
   const chip = all ? `<span class="chip ${done === all ? 'full' : ''}">CK ${done}/${all}</span>` : '<span></span>';
   const nImg = (t.images || []).length;
   const ichip = nImg ? `<span class="chip">IMG ${nImg}</span>` : '<span></span>';
@@ -890,8 +1041,17 @@ function rowHtml(t) {
   const prio = p !== 'normal' ? `<span class="prio ${p}">${PRIO_LABEL[p]}</span>` : '<span></span>';
   const typ = t.type && TYPE_LABEL[t.type]
     ? `<span class="typ ${t.type}">${TYPE_LABEL[t.type]}</span>` : '<span></span>';
+  // done rows show when they were closed, not when last touched
+  const stamp = (t.status === 'done' && t.completed_at) ? t.completed_at : t.updated_at;
+  let when = stamp.slice(5, 16).replace('T', ' · '), whenCls = '';
+  if (filters.view === 'today') {
+    const n = stsDoneToday(t);
+    whenCls = ' tdy';
+    when = doneToday(t) ? '✓ ' + (t.completed_at || '').slice(11, 16)
+                        : '✓ ' + n + ' subtask' + (n === 1 ? '' : 's');
+  }
   return `
-  <div class="row ${t.status} ${t.category ? 'cat-' + t.category : ''}" data-id="${t.id}" title="${t.category || ''}">
+  <div class="row ${t.status} ${t.archived ? 'arch' : ''} ${t.category ? 'cat-' + t.category : ''}" data-id="${t.id}" title="${t.category || ''}">
     <span class="lamp ${t.status}"></span>
     <span class="tnum">T${String(t.num).padStart(2, '0')}</span>
     <span class="title">${esc(t.title)}</span>
@@ -899,19 +1059,24 @@ function rowHtml(t) {
     ${prio}
     ${chip}
     ${ichip}
-    <span class="when">${t.updated_at.slice(5, 16).replace('T', ' · ')}</span>
+    <span class="when${whenCls}">${when}</span>
     <button class="pinbtn ${t.pinned ? 'on' : ''}" data-pin="${t.id}" title="${t.pinned ? 'Unpin' : 'Pin for call agenda'}">📌</button>
   </div>`;
 }
 
 function render() {
-  // pinned = temporary call agenda; ignores category filters, tasks also stay in their normal section
-  const pins = tasks.filter(t => t.pinned).sort((a, b) => a.num - b.num);
+  // pinned = temporary call agenda; ignores filters, but archived tasks never surface here
+  const pins = tasks.filter(t => t.pinned && !t.archived).sort((a, b) => a.num - b.num);
   $('#pins').style.display = pins.length ? '' : 'none';
   $('#pins-rows').innerHTML = pins.map(rowHtml).join('');
   $('#pins-n').textContent = String(pins.length).padStart(2, '0');
 
-  const matched = tasks.filter(t => Object.keys(DIM).every(k => matchDim(t, k)));
+  // view dimension first: archived tasks only exist in the Archived view;
+  // Today = closed today or ≥1 subtask checked off today
+  const visible = tasks
+    .filter(t => filters.view === 'archived' ? t.archived : !t.archived)
+    .filter(t => filters.view !== 'today' || doneToday(t) || stsDoneToday(t));
+  const matched = visible.filter(t => Object.keys(DIM).every(k => matchDim(t, k)));
   const pool = matched.filter(t => !t.pinned); // pinned rows live only in the agenda section
   const open = pool.filter(t => t.status !== 'done');
   const done = pool.filter(t => t.status === 'done');
@@ -919,8 +1084,8 @@ function render() {
   open.sort((a, b) =>
     (PRIO_RANK[prioOf(a)] - PRIO_RANK[prioOf(b)]) ||
     ((a.status === 'doing' ? 0 : 1) - (b.status === 'doing' ? 0 : 1)) || (a.num - b.num));
-  // newest completed first
-  done.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  // most recently closed first
+  done.sort((a, b) => (b.completed_at || b.updated_at).localeCompare(a.completed_at || a.updated_at));
 
   $('#ops-rows').innerHTML = open.map(rowHtml).join('') || '<div class="empty">// no open tasks — all systems nominal</div>';
   $('#log-rows').innerHTML = done.map(rowHtml).join('') || '<div class="empty">// nothing completed yet</div>';
@@ -939,6 +1104,39 @@ function sect(label, text, interactive, field) {
   return `<div class="sect-label">${label}</div>` +
     (text ? `<div class="sect md" ${field ? `data-ckfield="${field}"` : ''}>${md(text, interactive)}</div>`
           : `<div class="sect empty-sect">— nothing recorded —</div>`);
+}
+
+function stSection(t) {
+  const st = t.subtasks || [];
+  const rows = st.map((s, i) => {
+    if (stEdit === s.id) return `
+      <div class="ck-item st-row"><span class="ck-num">${i + 1}.</span>
+        <div class="st-ed">
+          <input type="text" id="st-ed-text" value="${esc(s.text)}">
+          <input type="text" id="st-ed-reason" value="${esc(s.reasoning || '')}" placeholder="Reasoning — why this subtask exists (optional)">
+          <div class="st-ed-btns">
+            <button class="primary" data-stsave="${s.id}">Save</button>
+            <button data-stcancel="1">Cancel</button>
+          </div>
+        </div>
+      </div>`;
+    return `
+      <div class="ck-item st-row ${s.done ? 'done' : ''}" title="created ${(s.created_at || '—').replace('T', ' ')}${s.completed_at ? ' · completed ' + s.completed_at.replace('T', ' ') : ''}">
+        <span class="ck-num">${i + 1}.</span>
+        <input type="checkbox" data-stck="${s.id}" ${s.done ? 'checked' : ''}>
+        <div class="st-main">
+          <span class="st-text">${esc(s.text)}</span>
+          ${s.reasoning ? `<div class="st-reason">${esc(s.reasoning)}</div>` : ''}
+        </div>
+        <button class="st-btn" data-sted="${s.id}" title="Edit subtask">✎</button>
+        <button class="st-btn del" data-stdel="${s.id}" title="Remove subtask">✕</button>
+      </div>`;
+  }).join('');
+  return `<div class="sect-label">Subtasks</div>
+    <div class="sect" data-stlist>
+      ${rows || '<span class="st-none">— none —</span>'}
+      <div class="st-add"><input type="text" id="st-new" placeholder="+ add subtask — Enter to save"></div>
+    </div>`;
 }
 
 function segControl(current) {
@@ -981,8 +1179,8 @@ function renderModal() {
         <input type="text" id="e-title" value="${esc(d.title)}" placeholder="What needs to be done">
         <label>Reasoning <span class="hint">— why this task exists</span></label>
         <textarea id="e-reasoning" rows="3">${esc(d.reasoning)}</textarea>
-        <label>Subtasks <span class="hint">— one "- [ ]" line per subtask</span></label>
-        <textarea id="e-subtasks" class="mono" rows="5">${esc(d.subtasks || '')}</textarea>
+        ${t ? '' : `<label>Subtasks <span class="hint">— one per line (optional)</span></label>
+        <textarea id="e-subtasks" class="mono" rows="4"></textarea>`}
         <label>Output / Notes <span class="hint">— markdown</span></label>
         <textarea id="e-notes" class="mono" rows="9">${esc(d.notes)}</textarea>
         <label>Status</label>
@@ -1010,13 +1208,13 @@ function renderModal() {
   m.innerHTML = `
     <button class="m-close" data-act="close">✕</button>
     <div class="m-head">
-      <div class="m-id">TASK ${String(t.num).padStart(2, '0')} · ${t.id}${t.pinned ? '<span class="m-pin">📌 PINNED</span>' : ''}</div>
+      <div class="m-id">TASK ${String(t.num).padStart(2, '0')} · ${t.id}${t.pinned ? '<span class="m-pin">📌 PINNED</span>' : ''}${t.archived ? '<span class="m-pin" style="color:var(--muted)">🗄 ARCHIVED</span>' : ''}</div>
       <h2 class="m-title">${esc(t.title)}</h2>
       <div style="display:flex;gap:10px;flex-wrap:wrap">${segControl(t.status)}${segType(t.type || '')}${Object.keys(CAT_LABEL).length ? segCat(t.category || '') : ''}${segPrio(prioOf(t))}</div>
     </div>
     <div class="m-body">
       ${sect('Reasoning', t.reasoning, false)}
-      ${sect('Subtasks', t.subtasks, true, 'subtasks')}
+      ${stSection(t)}
       ${sect('Output / Notes', t.notes, true, 'notes')}
       <div class="sect-label">Images</div>
       <div class="thumbs">
@@ -1029,20 +1227,20 @@ function renderModal() {
       </div>
     </div>
     <div class="m-foot">
-      <span class="meta">CREATED ${t.created_at.replace('T',' ')} · UPDATED ${t.updated_at.replace('T',' ')}</span>
+      <span class="meta">CREATED ${t.created_at.replace('T',' ')} · UPDATED ${t.updated_at.replace('T',' ')}${t.completed_at ? ' · COMPLETED ' + t.completed_at.replace('T',' ') : ''}${t.archived ? ' · ARCHIVED ' + (t.archived_at || '').replace('T',' ') : ''}</span>
       <button class="danger" data-act="delete">Delete</button>
+      <button data-act="archive">${t.archived ? 'Unarchive' : '🗄 Archive'}</button>
       <button data-act="pin">${t.pinned ? 'Unpin' : '📌 Pin'}</button>
       <button data-act="edit">Edit</button>
     </div>`;
 }
 
-function closeModal() { closeLb(); modalId = null; editMode = false; renderModal(); }
+function closeModal() { closeLb(); modalId = null; editMode = false; stEdit = null; renderModal(); }
 
 async function saveEditor() {
   const body = {
     title: $('#e-title').value,
     reasoning: $('#e-reasoning').value,
-    subtasks: $('#e-subtasks').value,
     notes: $('#e-notes').value,
     status: $('#e-status').value,
     category: $('#e-cat').value,
@@ -1052,8 +1250,9 @@ async function saveEditor() {
   if (!body.title.trim()) { $('#e-title').focus(); return; }
   try {
     if (modalId) {
-      await api('PUT', '/api/tasks/' + modalId, body);
+      await api('PUT', '/api/tasks/' + modalId, body); // subtasks untouched — managed in task view
     } else {
+      body.subtasks = $('#e-subtasks').value;
       const created = await api('POST', '/api/tasks', body);
       modalId = created.id;
     }
@@ -1135,8 +1334,31 @@ document.addEventListener('click', async ev => {
     return;
   }
 
+  const sted = ev.target.closest('[data-sted]');
+  if (sted) { stEdit = sted.dataset.sted; renderModal(); $('#st-ed-text')?.focus(); return; }
+  const stcan = ev.target.closest('[data-stcancel]');
+  if (stcan) { stEdit = null; renderModal(); return; }
+  const stsave = ev.target.closest('[data-stsave]');
+  if (stsave) {
+    const text = $('#st-ed-text').value.trim();
+    if (!text) { $('#st-ed-text').focus(); return; }
+    const reasoning = $('#st-ed-reason').value.trim();
+    const list = curSt().map(s => s.id === stsave.dataset.stsave ? { ...s, text, reasoning } : s);
+    stEdit = null;
+    await putSt(list);
+    return;
+  }
+  const stdel = ev.target.closest('[data-stdel]');
+  if (stdel) {
+    if (confirm('Remove this subtask?')) {
+      stEdit = null;
+      await putSt(curSt().filter(s => s.id !== stdel.dataset.stdel));
+    }
+    return;
+  }
+
   const row = ev.target.closest('.row');
-  if (row) { modalId = row.dataset.id; editMode = false; renderModal(); return; }
+  if (row) { modalId = row.dataset.id; editMode = false; stEdit = null; renderModal(); return; }
 
   const act = ev.target.closest('[data-act]');
   if (act) {
@@ -1148,6 +1370,11 @@ document.addEventListener('click', async ev => {
     else if (a === 'pin') {
       const t = tasks.find(x => x.id === modalId);
       await api('PUT', '/api/tasks/' + modalId, { pinned: !(t && t.pinned) });
+      await refresh();
+    }
+    else if (a === 'archive') {
+      const t = tasks.find(x => x.id === modalId);
+      await api('PUT', '/api/tasks/' + modalId, { archived: !(t && t.archived) });
       await refresh();
     }
     else if (a === 'delete') {
@@ -1234,6 +1461,11 @@ document.addEventListener('click', async ev => {
 });
 
 document.addEventListener('change', async ev => {
+  const scb = ev.target.closest('input[data-stck]');
+  if (scb && modalId && !editMode) {
+    await putSt(curSt().map(s => s.id === scb.dataset.stck ? { ...s, done: scb.checked } : s));
+    return;
+  }
   const cb = ev.target.closest('input[data-ck]');
   if (cb && modalId && !editMode) {
     const field = cb.closest('[data-ckfield]')?.dataset.ckfield || 'notes';
@@ -1248,6 +1480,16 @@ document.addEventListener('keydown', ev => {
     else if (ev.key === 'ArrowRight') openLb(lbIdx + 1);
     return;
   }
+  if (ev.key === 'Enter' && ev.target.id === 'st-new') {
+    const text = ev.target.value.trim();
+    if (text) { ev.target.value = ''; putSt([...curSt(), { text }]).then(() => $('#st-new')?.focus()); }
+    return;
+  }
+  if (ev.key === 'Enter' && (ev.target.id === 'st-ed-text' || ev.target.id === 'st-ed-reason')) {
+    $('[data-stsave]')?.click();
+    return;
+  }
+  if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
 });
 

@@ -32,9 +32,14 @@ else, it gets a task.
 - **title** — short, concrete, outcome-shaped ("Build X", "Fix Y", "Decide Z").
 - **reasoning** — one or two plain sentences on why the task exists. Optional; skip it
   when the why is obvious from the title. Never pad it.
-- **subtasks** — the task's checklist, one `- [ ]` / `- [x]` line per subtask
-  (markdown, rendered as live checkboxes). Checklists go HERE, not in notes. This is
-  what "subtask N" refers to.
+- **subtasks** — the task's checklist, stored as an ARRAY of objects:
+  `{"id", "text", "reasoning", "done", "created_at", "completed_at"}`. Checklists go
+  HERE, not in notes. This is what "subtask N" refers to. When writing via the API you
+  may send either the array (send full objects back, changing only what you mean to
+  change) or a markdown string of `- [ ]` / `- [x]` lines, which the server parses and
+  matches to existing items by text. Either way the server owns `id`, `created_at`,
+  and `completed_at` (stamped when an item flips to done, cleared when unchecked) —
+  never fabricate those. `reasoning` on a subtask is optional and usually empty.
 - **notes** — **the most important field.** See below.
 - **status** — `todo` | `doing` | `done`. Keep it honest; `done` means done and verified.
 - **category** — one of the project slugs configured in `config.json` (see "Board
@@ -48,6 +53,13 @@ else, it gets a task.
   back-burner items — don't invent priorities the user didn't signal.
 - **pinned** — the user's temporary call agenda. Only pin/unpin when asked, never on
   your own initiative. Pin toggles don't bump `updated_at`.
+- **archived** — hides the task from every view except the board's Archived view,
+  without deleting it. Set via `PUT {"archived": true|false}`; the server manages
+  `archived_at` and doesn't bump `updated_at` for it. Archive only when asked. Prefer
+  archiving over deleting for anything with history worth keeping.
+- **completed_at** — server-managed: stamped when status flips to `done`, cleared on
+  reopen. Powers the board's Today view ("what was closed today"). Never set it in an
+  API body — it's ignored there; status changes are the only way it moves.
 - **images** — attach via the API only (`POST /api/tasks/<id>/images` with raw image
   bytes); never invent filenames in the JSON.
 
@@ -84,7 +96,9 @@ the file (it's the source of truth), then restart with
 `python3 server.py` (from the taskctrl directory, backgrounded). When editing by hand:
 preserve other tasks exactly, keep the `{"tasks": [...]}` shape, use a fresh
 12-lowercase-hex `id`, set `num` to max(num)+1, timestamps are local time
-(`YYYY-MM-DDTHH:MM:SS`, no timezone).
+(`YYYY-MM-DDTHH:MM:SS`, no timezone). Hand-written subtasks must use the structured
+shape (fresh 6-hex `id` per item); a markdown string is only understood by the API,
+though the server will migrate one on next load.
 
 NEVER renumber existing tasks — numbers must stay stable so references keep meaning
 the same thing (deleting a task retires its number).
@@ -111,8 +125,8 @@ field on its existing tasks (via the API).
 ## How the user references tasks and subtasks
 
 - **"task 3" / "T03"** = the task with `num: 3`, regardless of status or position.
-- **"subtask 2 of task 3"** = the 2nd `- [ ]`/`- [x]` line in that task's `subtasks`
-  field, counting from 1 (the board numbers them). Subtask numbers are positional —
-  append new items at the end rather than inserting in the middle, unless asked.
+- **"subtask 2 of task 3"** = the 2nd item in that task's `subtasks` array, counting
+  from 1 (the board numbers them). Subtask numbers are positional — append new items
+  at the end rather than inserting in the middle, unless asked.
 - "do tasks 1-3" is an instruction to execute that work: set the task to `doing`, do
   the referenced items, check them off as each completes, record findings in notes.
