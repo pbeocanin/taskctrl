@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST = "0.0.0.0"
@@ -22,6 +23,27 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "tasks.json")
 
 _lock = threading.Lock()
+
+# In-memory feed of recent mutations, polled by the page for toast
+# notifications. Lost on restart by design — toasts only matter live.
+_events = deque(maxlen=200)
+_event_seq = 0
+
+
+def add_event(actor, action, task, detail=""):
+    """Record a mutation. Callers already hold _lock."""
+    global _event_seq
+    _event_seq += 1
+    _events.append({
+        "seq": _event_seq,
+        "ts": now_iso(),
+        "actor": actor,  # "board" = this page's own UI, anything else = an agent
+        "action": action,  # created | updated | deleted
+        "task_id": task["id"],
+        "num": task.get("num", 0),
+        "title": task.get("title", ""),
+        "detail": detail,
+    })
 
 STATUSES = ("todo", "doing", "done")
 PRIORITIES = ("high", "normal", "low")
@@ -199,6 +221,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/tasks/([\w-]+)", self.path)
         return m.group(1) if m else None
 
+    def _actor(self):
+        # the board's own fetches send X-Board-Client; anything else is an agent
+        return "board" if self.headers.get("X-Board-Client") else "agent"
+
     def log_message(self, fmt, *args):
         pass  # keep stdout quiet
 
@@ -214,6 +240,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/tasks":
             with _lock:
                 self._json(200, load_db())
+        elif self.path == "/api/events" or self.path.startswith("/api/events?"):
+            m = re.search(r"[?&]since=(\d+)", self.path)
+            since = int(m.group(1)) if m else None
+            with _lock:
+                evs = [] if since is None else [e for e in _events if e["seq"] > since]
+                self._json(200, {"seq": _event_seq, "events": evs})
         elif self.path.startswith("/images/"):
             name = self.path[len("/images/"):]
             path = os.path.join(IMAGES_DIR, name)
@@ -264,6 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             task["num"] = max((t.get("num", 0) for t in db["tasks"]), default=0) + 1
             db["tasks"].append(task)
             save_db(db)
+            add_event(self._actor(), "created", task)
         self._json(201, task)
 
     def _upload_image(self, tid):
@@ -289,6 +322,7 @@ class Handler(BaseHTTPRequestHandler):
             task.setdefault("images", []).append(name)
             task["updated_at"] = now_iso()  # an attachment is content, unlike a pin
             save_db(db)
+            add_event(self._actor(), "updated", task, "image added")
         self._json(201, task)
 
     def do_PUT(self):
@@ -302,12 +336,22 @@ class Handler(BaseHTTPRequestHandler):
             if not task:
                 return self._json(404, {"error": "no such task"})
             now = now_iso()
+            changed = []  # human-readable fragments for the event feed
             for field in ("title", "reasoning", "notes"):
                 if field in body:
-                    task[field] = str(body[field]).strip()
+                    val = str(body[field]).strip()
+                    if val != task.get(field, ""):
+                        changed.append(field)
+                    task[field] = val
             if "subtasks" in body:
-                task["subtasks"] = normalize_subtasks(body["subtasks"], task.get("subtasks") or [], now)
+                old_st = task.get("subtasks") or []
+                task["subtasks"] = normalize_subtasks(body["subtasks"], old_st, now)
+                if task["subtasks"] != old_st:
+                    n_new = sum(1 for s in task["subtasks"] if s.get("done")) - sum(1 for s in old_st if s.get("done"))
+                    changed.append(f"{n_new} subtask{'s' if n_new > 1 else ''} ✓" if n_new > 0 else "subtasks")
             if body.get("status") in STATUSES:
+                if body["status"] != task["status"]:
+                    changed.append("→ " + body["status"])
                 # completed_at marks the todo/doing → done transition; reopening clears it
                 if body["status"] == "done" and task["status"] != "done":
                     task["completed_at"] = now
@@ -315,15 +359,28 @@ class Handler(BaseHTTPRequestHandler):
                     task.pop("completed_at", None)
                 task["status"] = body["status"]
             if "category" in body:
-                task["category"] = body["category"] if body["category"] in categories() else ""
+                val = body["category"] if body["category"] in categories() else ""
+                if val != task.get("category", ""):
+                    changed.append("category")
+                task["category"] = val
             if "priority" in body:
-                task["priority"] = body["priority"] if body["priority"] in PRIORITIES else "normal"
+                val = body["priority"] if body["priority"] in PRIORITIES else "normal"
+                if val != task.get("priority", "normal"):
+                    changed.append("priority")
+                task["priority"] = val
             if "type" in body:
-                task["type"] = body["type"] if body["type"] in TYPES else ""
+                val = body["type"] if body["type"] in TYPES else ""
+                if val != task.get("type", ""):
+                    changed.append("type")
+                task["type"] = val
             if "pinned" in body:
+                if bool(body["pinned"]) != bool(task.get("pinned")):
+                    changed.append("pinned" if body["pinned"] else "unpinned")
                 task["pinned"] = bool(body["pinned"])
             if "archived" in body:
                 arch = bool(body["archived"])
+                if arch != bool(task.get("archived")):
+                    changed.append("archived" if arch else "unarchived")
                 if arch and not task.get("archived"):
                     task["archived_at"] = now
                 elif not arch:
@@ -334,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             if not set(body) <= {"pinned", "archived"}:  # pin/archive toggles are metadata, not work
                 task["updated_at"] = now
             save_db(db)
+            if changed:  # no-op PUTs don't make noise
+                add_event(self._actor(), "updated", task, ", ".join(changed))
         self._json(200, task)
 
     def do_DELETE(self):
@@ -348,6 +407,7 @@ class Handler(BaseHTTPRequestHandler):
                 task["images"].remove(name)
                 task["updated_at"] = now_iso()
                 save_db(db)
+                add_event(self._actor(), "updated", task, "image removed")
                 try:
                     os.remove(os.path.join(IMAGES_DIR, name))
                 except OSError:
@@ -364,6 +424,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(404, {"error": "no such task"})
             db["tasks"] = [t for t in db["tasks"] if t["id"] != tid]
             save_db(db)
+            add_event(self._actor(), "deleted", gone)
             for name in gone.get("images", []):  # no orphan files
                 try:
                     os.remove(os.path.join(IMAGES_DIR, name))
@@ -819,6 +880,27 @@ PAGE = r"""<!doctype html>
     .row .chip, .row .when, .row .prio, .row .typ { display: none; }
     .clockbox { display: none; }
   }
+  /* toasts — live feed of agent activity, bottom-right */
+  .toasts {
+    position: fixed; right: 16px; bottom: 16px; z-index: 400;
+    display: flex; flex-direction: column; gap: 8px;
+    width: min(340px, calc(100vw - 32px));
+  }
+  .toast {
+    display: flex; align-items: baseline; gap: 8px; padding: 8px 12px;
+    border: 1px solid var(--line2); border-left: 3px solid var(--amber); border-radius: 4px;
+    background: linear-gradient(180deg, var(--panel2), var(--panel));
+    box-shadow: 0 8px 28px rgba(0,0,0,.55);
+    font: 12px/1.45 var(--mono); color: var(--dim); cursor: pointer;
+    animation: toast-in .18s ease-out;
+  }
+  .toast.created { border-left-color: var(--green); }
+  .toast.deleted { border-left-color: var(--red); }
+  .toast .tn { color: var(--cyan); flex: none; }
+  .toast .tt { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast .td { color: var(--muted); flex: none; margin-left: auto; }
+  .toast.out { opacity: 0; transform: translateX(12px); transition: opacity .3s, transform .3s; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 </style>
 </head>
 <body>
@@ -877,6 +959,8 @@ PAGE = r"""<!doctype html>
     <div class="rows" id="log-rows"></div>
   </section>
 </div>
+
+<div class="toasts" id="toasts"></div>
 
 <div class="backdrop" id="backdrop">
   <div class="modal" id="modal"></div>
@@ -1008,7 +1092,8 @@ const ckStats = notes => {
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body ? {'Content-Type': 'application/json'} : {},
+    // X-Board-Client tells the event feed this change is ours, not an agent's
+    headers: body ? {'Content-Type': 'application/json', 'X-Board-Client': '1'} : {'X-Board-Client': '1'},
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error((await res.json()).error || res.statusText);
@@ -1289,7 +1374,7 @@ async function uploadImages(files) {
     if (!f.type.startsWith('image/')) continue;
     if (f.size > 10 * 1024 * 1024) { alert(f.name + ' is over the 10 MB cap'); continue; }
     const res = await fetch('/api/tasks/' + modalId + '/images', {
-      method: 'POST', headers: { 'Content-Type': f.type }, body: f,
+      method: 'POST', headers: { 'Content-Type': f.type, 'X-Board-Client': '1' }, body: f,
     });
     if (!res.ok) { alert((await res.json()).error || res.statusText); break; }
   }
@@ -1542,6 +1627,39 @@ setInterval(tick, 1000); tick();
 
 refresh();
 setInterval(refresh, 15000); // pick up direct edits to tasks.json
+
+/* ---------- toasts: live feed of changes made through the API ---------- */
+let evSeq = null; // last event seq seen; null until the first poll primes it
+async function pollEvents() {
+  let r;
+  try {
+    r = await api('GET', evSeq === null ? '/api/events' : '/api/events?since=' + evSeq);
+  } catch (e) { return; } // server briefly down — next poll retries
+  if (evSeq === null) { evSeq = r.seq; return; } // prime only, no toasts for history
+  evSeq = r.seq;
+  if (r.events.length) refresh(); // something changed — show it now, not in 15s
+  r.events.filter(e => e.actor !== 'board').forEach(showToast);
+}
+function showToast(e) {
+  const box = $('#toasts');
+  while (box.children.length >= 5) box.firstChild.remove(); // cap the stack
+  const el = document.createElement('div');
+  el.className = 'toast ' + e.action;
+  el.innerHTML =
+    `<span class="tn">T${String(e.num).padStart(2, '0')}</span>` +
+    `<span class="tt">${esc(e.title)}</span>` +
+    `<span class="td">${esc(e.detail || e.action)}</span>`;
+  const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
+  el.onclick = () => {
+    dismiss();
+    if (e.action !== 'deleted' && tasks.find(t => t.id === e.task_id)) {
+      modalId = e.task_id; editMode = false; stEdit = null; renderModal();
+    }
+  };
+  box.appendChild(el);
+  setTimeout(dismiss, 7000);
+}
+setInterval(pollEvents, 4000); pollEvents();
 </script>
 </body>
 </html>
