@@ -264,6 +264,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/api/tasks/mark-reviewed":
+            # bulk "all filmed": flags every done-but-unreviewed task, archived included
+            now = now_iso()
+            with _lock:
+                db = load_db()
+                hit = [t for t in db["tasks"] if t.get("status") == "done" and not t.get("reviewed")]
+                for t in hit:
+                    t["reviewed"] = True
+                    t["reviewed_at"] = now
+                if hit:
+                    save_db(db)
+            return self._json(200, {"marked": len(hit)})
         m = re.fullmatch(r"/api/tasks/([\w-]+)/images", self.path)
         if m:
             return self._upload_image(m.group(1))
@@ -357,6 +369,11 @@ class Handler(BaseHTTPRequestHandler):
                     task["completed_at"] = now
                 elif body["status"] != "done" and task["status"] == "done":
                     task.pop("completed_at", None)
+                if body["status"] != task["status"]:
+                    # any status change resets the video flag: a fresh completion is
+                    # pending film again, and open tasks don't carry the flag at all
+                    task.pop("reviewed", None)
+                    task.pop("reviewed_at", None)
                 task["status"] = body["status"]
             if "category" in body:
                 val = body["category"] if body["category"] in categories() else ""
@@ -386,9 +403,18 @@ class Handler(BaseHTTPRequestHandler):
                 elif not arch:
                     task.pop("archived_at", None)
                 task["archived"] = arch
+            if "reviewed" in body:
+                # filmed-in-update-video flag; meta like a pin — no updated_at bump, no event
+                if bool(body["reviewed"]):
+                    if not task.get("reviewed"):
+                        task["reviewed"] = True
+                        task["reviewed_at"] = now
+                else:
+                    task.pop("reviewed", None)
+                    task.pop("reviewed_at", None)
             if not task["title"]:
                 return self._json(400, {"error": "title is required"})
-            if not set(body) <= {"pinned", "archived"}:  # pin/archive toggles are metadata, not work
+            if not set(body) <= {"pinned", "archived", "reviewed"}:  # metadata toggles, not work
                 task["updated_at"] = now
             save_db(db)
             if changed:  # no-op PUTs don't make noise
@@ -539,7 +565,7 @@ PAGE = r"""<!doctype html>
 
   .rows { display: flex; flex-direction: column; gap: 6px; }
   .row {
-    display: grid; grid-template-columns: 26px 38px 1fr auto auto auto auto auto auto; gap: 12px; align-items: center;
+    display: grid; grid-template-columns: 26px 38px 1fr auto auto auto auto auto auto auto; gap: 12px; align-items: center;
     border: 1px solid var(--line); border-left-width: 3px; background: var(--panel);
     border-radius: 3px; padding: 11px 14px; cursor: pointer; transition: all .12s;
     position: relative; overflow: hidden;
@@ -562,6 +588,15 @@ PAGE = r"""<!doctype html>
     border: 1px solid var(--line2); border-radius: 2px; padding: 2px 8px; white-space: nowrap;
   }
   .chip.full { color: var(--green); border-color: rgba(65,240,165,.4); }
+  .chip.rec { color: var(--red); border-color: rgba(255,95,102,.45); }
+  .chip.rec::first-letter { animation: rec-blink 1.6s steps(1) infinite; }
+  @keyframes rec-blink { 50% { color: transparent; } }
+  #review-all {
+    font: 700 10px var(--mono); letter-spacing: .15em; text-transform: uppercase;
+    color: var(--green); background: rgba(65,240,165,.08); border: 1px solid rgba(65,240,165,.4);
+    border-radius: 2px; padding: 3px 10px; cursor: pointer;
+  }
+  #review-all:hover { background: rgba(65,240,165,.16); }
 
   /* ---------- HUD filter panel (game-menu mode on wide screens) ---------- */
   .hud { margin-bottom: 20px; }
@@ -938,6 +973,7 @@ PAGE = r"""<!doctype html>
       <div class="hud-sec"><span class="hud-lab">View</span>
         <button class="cf" data-f="view" data-v="all"><span>All</span></button>
         <button class="cf" data-f="view" data-v="today"><span>Today</span></button>
+        <button class="cf" data-f="view" data-v="video"><span>To Film</span></button>
         <button class="cf" data-f="view" data-v="archived"><span>Archived</span></button>
       </div>
       <i class="hud-fx"></i>
@@ -955,7 +991,7 @@ PAGE = r"""<!doctype html>
   </section>
 
   <section class="panel" id="log">
-    <div class="panel-head">Mission Log · Completed<span class="rule"></span><span class="n" id="log-n"></span></div>
+    <div class="panel-head">Mission Log · Completed<span class="rule"></span><button id="review-all" style="display:none">✓ All filmed</button><span class="n" id="log-n"></span></div>
     <div class="rows" id="log-rows"></div>
   </section>
 </div>
@@ -1002,7 +1038,7 @@ const FILTER_VALS = {
   cat:  ['all', ...Object.keys(CAT_LABEL)],
   typ:  ['all', ...Object.keys(TYPE_LABEL)],
   prio: ['all', ...Object.keys(PRIO_LABEL)],
-  view: ['all', 'today', 'archived'],
+  view: ['all', 'today', 'video', 'archived'],
 };
 const filters = {};
 for (const k of Object.keys(FILTER_VALS)) {
@@ -1122,6 +1158,7 @@ function rowHtml(t) {
   const chip = all ? `<span class="chip ${done === all ? 'full' : ''}">CK ${done}/${all}</span>` : '<span></span>';
   const nImg = (t.images || []).length;
   const ichip = nImg ? `<span class="chip">IMG ${nImg}</span>` : '<span></span>';
+  const rec = (t.status === 'done' && !t.reviewed) ? '<span class="chip rec">● REC</span>' : '<span></span>';
   const p = prioOf(t);
   const prio = p !== 'normal' ? `<span class="prio ${p}">${PRIO_LABEL[p]}</span>` : '<span></span>';
   const typ = t.type && TYPE_LABEL[t.type]
@@ -1144,6 +1181,7 @@ function rowHtml(t) {
     ${prio}
     ${chip}
     ${ichip}
+    ${rec}
     <span class="when${whenCls}">${when}</span>
     <button class="pinbtn ${t.pinned ? 'on' : ''}" data-pin="${t.id}" title="${t.pinned ? 'Unpin' : 'Pin for call agenda'}">📌</button>
   </div>`;
@@ -1160,7 +1198,9 @@ function render() {
   // Today = closed today or ≥1 subtask checked off today
   const visible = tasks
     .filter(t => filters.view === 'archived' ? t.archived : !t.archived)
-    .filter(t => filters.view !== 'today' || doneToday(t) || stsDoneToday(t));
+    .filter(t => filters.view !== 'today' || doneToday(t) || stsDoneToday(t))
+    // To Film = completed but not yet covered in an update video, whenever it was closed
+    .filter(t => filters.view !== 'video' || (t.status === 'done' && !t.reviewed));
   const matched = visible.filter(t => Object.keys(DIM).every(k => matchDim(t, k)));
   const pool = matched.filter(t => !t.pinned); // pinned rows live only in the agenda section
   const open = pool.filter(t => t.status !== 'done');
@@ -1173,7 +1213,9 @@ function render() {
   done.sort((a, b) => (b.completed_at || b.updated_at).localeCompare(a.completed_at || a.updated_at));
 
   $('#ops-rows').innerHTML = open.map(rowHtml).join('') || '<div class="empty">// no open tasks — all systems nominal</div>';
-  $('#log-rows').innerHTML = done.map(rowHtml).join('') || '<div class="empty">// nothing completed yet</div>';
+  $('#log-rows').innerHTML = done.map(rowHtml).join('') ||
+    `<div class="empty">${filters.view === 'video' ? '// nothing left to film — all caught up' : '// nothing completed yet'}</div>`;
+  $('#review-all').style.display = (filters.view === 'video' && done.length) ? '' : 'none';
   $('#ops-n').textContent = open.length ? String(open.length).padStart(2, '0') : '00';
   $('#log-n').textContent = done.length ? String(done.length).padStart(2, '0') : '00';
   $('#ro-todo').textContent  = String(matched.filter(t => t.status === 'todo').length).padStart(2, '0');
@@ -1312,9 +1354,10 @@ function renderModal() {
       </div>
     </div>
     <div class="m-foot">
-      <span class="meta">CREATED ${t.created_at.replace('T',' ')} · UPDATED ${t.updated_at.replace('T',' ')}${t.completed_at ? ' · COMPLETED ' + t.completed_at.replace('T',' ') : ''}${t.archived ? ' · ARCHIVED ' + (t.archived_at || '').replace('T',' ') : ''}</span>
+      <span class="meta">CREATED ${t.created_at.replace('T',' ')} · UPDATED ${t.updated_at.replace('T',' ')}${t.completed_at ? ' · COMPLETED ' + t.completed_at.replace('T',' ') : ''}${t.reviewed_at ? ' · FILMED ' + t.reviewed_at.replace('T',' ') : ''}${t.archived ? ' · ARCHIVED ' + (t.archived_at || '').replace('T',' ') : ''}</span>
       <button class="danger" data-act="delete">Delete</button>
       <button data-act="archive">${t.archived ? 'Unarchive' : '🗄 Archive'}</button>
+      ${t.status === 'done' ? `<button data-act="review">${t.reviewed ? 'Unmark filmed' : '🎥 Filmed'}</button>` : ''}
       <button data-act="pin">${t.pinned ? 'Unpin' : '📌 Pin'}</button>
       <button data-act="edit">Edit</button>
     </div>`;
@@ -1462,6 +1505,11 @@ document.addEventListener('click', async ev => {
       await api('PUT', '/api/tasks/' + modalId, { archived: !(t && t.archived) });
       await refresh();
     }
+    else if (a === 'review') {
+      const t = tasks.find(x => x.id === modalId);
+      await api('PUT', '/api/tasks/' + modalId, { reviewed: !(t && t.reviewed) });
+      await refresh();
+    }
     else if (a === 'delete') {
       if (confirm('Delete this task permanently?')) {
         await api('DELETE', '/api/tasks/' + modalId);
@@ -1602,6 +1650,11 @@ modalEl.addEventListener('drop', ev => {
 $('#imgfile').onchange = async ev => { await uploadImages([...ev.target.files]); ev.target.value = ''; };
 
 $('#new-btn').onclick = () => { modalId = ''; editMode = false; renderModal(); };
+$('#review-all').onclick = async ev => {
+  ev.stopPropagation(); // panel-head clicks shouldn't fall through to row handling
+  await api('POST', '/api/tasks/mark-reviewed');
+  await refresh();
+};
 
 /* HUD mouse-tracking tilt (wide mode; harmless no-op when panel is flat) */
 const hudEl = $('.hud'), hudInner = $('.hud-inner');
