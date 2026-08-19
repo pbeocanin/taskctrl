@@ -1016,7 +1016,7 @@ async function api(method, path, body) {
 }
 
 async function refresh() {
-  if (editMode || stEdit !== null) return; // never clobber an open editor
+  if (editMode || stEdit !== null || modalId === '') return; // never clobber an open editor (incl. the New Task form)
   const stNew = $('#st-new');
   if (stNew && (stNew.value.trim() || document.activeElement === stNew)) return; // mid-typing a new subtask
   tasks = (await api('GET', '/api/tasks')).tasks;
