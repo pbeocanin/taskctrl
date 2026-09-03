@@ -57,6 +57,18 @@ else, it gets a task.
   without deleting it. Set via `PUT {"archived": true|false}`; the server manages
   `archived_at` and doesn't bump `updated_at` for it. Archive only when asked. Prefer
   archiving over deleting for anything with history worth keeping.
+- **reviewed** — "filmed": this completed task has been covered in an update video /
+  demo / changelog. Done tasks show a `● REC` chip until it's set; the board's To Film
+  view lists them. Set via `PUT {"reviewed": true}` only when the user says the task
+  has been filmed/covered (or use `POST /api/tasks/mark-reviewed` when they say
+  "everything's filmed"). The server stamps `reviewed_at`, doesn't bump `updated_at`,
+  and clears the flag on any later status change.
+- **prod_shape** — red warning that this task's work changes the shape of production
+  data (a migration, a column reinterpretation, a row re-encoding). Set
+  `PUT {"prod_shape": true}` when starting such work — it's the one flag you SHOULD
+  set on your own initiative, because it exists to warn the user. The row gets a
+  pulsing `PROD SHAPE` badge and bypasses all board filters. Clear it (`false`) once
+  the change is live on prod.
 - **completed_at** — server-managed: stamped when status flips to `done`, cleared on
   reopen. Powers the board's Today view ("what was closed today"). Never set it in an
   API body — it's ignored there; status changes are the only way it moves.
@@ -90,6 +102,11 @@ notes for prose, findings, and mechanisms.
 - **Update:** `PUT /api/tasks/<id>` with just the fields to change (partial updates
   preserve everything else). The server bumps `updated_at` (except pin-only toggles).
 - **Delete:** `DELETE /api/tasks/<id>`.
+- **Bulk filmed:** `POST /api/tasks/mark-reviewed` flags every done-but-unreviewed task.
+
+Every API write shows up on the user's open board as a live toast within a few
+seconds, naming the task and what changed — so no-op PUTs are fine (they make no
+noise), but avoid churny writes; each one is a notification.
 
 Direct edits to `tasks.json` are the fallback only for when the server is down: edit
 the file (it's the source of truth), then restart with
@@ -109,13 +126,15 @@ Projects (categories) live in `config.json` next to `server.py`:
 
 ```json
 {
+  "tagline": "mission board · home lab",
   "categories": {
     "slug": { "label": "Display Name", "color": "#a1b2c3" }
   }
 }
 ```
 
-When the user asks to set up or change the projects on their board, create or edit
+`tagline` is the subtitle under the TASKCTRL wordmark (optional, defaults to
+`mission board`). When the user asks to set up or change the projects on their board, create or edit
 this file directly — the server re-reads it on every page load, no restart needed.
 Use short lowercase slugs, and pick visually distinct colors (6-digit hex) since the
 color becomes the category's accent throughout the UI. Renaming a slug orphans tasks

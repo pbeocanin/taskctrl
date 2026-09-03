@@ -11,6 +11,8 @@ python3 server.py
 # → http://localhost:8100
 ```
 
+![The board](docs/board.png)
+
 ## Why it exists
 
 Most task tools assume a human clicking a UI. TASKCTRL assumes your tasks are updated by
@@ -44,11 +46,27 @@ write call-ready notes when it ships.
   queued, with badges only on non-normal priorities
 - **Pinned · Call Agenda** — pin tasks into an agenda section at the top for your next
   update call; pinning moves the row there and ignores filters
+- **To Film view** — completed tasks carry a `● REC` chip until you mark them "filmed"
+  (covered in an update video / demo / changelog). The view lists everything done but
+  not yet filmed, whenever it was closed, with a one-click **All filmed**. Reopening a
+  task resets the flag, so a fresh completion is filmable again.
+- **Prod-shape warning** — flag a task whose work changes the shape of production data
+  (a migration, a column reinterpretation). It gets a pulsing red `PROD SHAPE` badge and
+  a red row edge, and it ignores project/type/priority filters so it can't hide. Clear it
+  once the change is live.
+- **Live toasts** — every change made through the API (i.e. by an agent, not by the
+  page itself) shows up as a toast docked to the right edge within a few seconds:
+  created / updated / deleted, task number, and what changed (`→ doing`,
+  `2 subtasks ✓`, `priority`…). Click a toast to open the task.
 - **The HUD** — on wide screens the filters dock as a 3D game-menu side panel:
   mouse-tracking tilt, staggered fly-in, holo sweep, breathing active glow, and a
   chromatic glitch on click. Flat filter rows below 1280px. Exclusive filters for
   project / type / priority / view (Today, Archived), persisted in localStorage.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
+
+![Task view](docs/task.png)
+
+![Toasts from agent activity](docs/toasts.png)
 
 ## Quickstart
 
@@ -70,6 +88,8 @@ network as well as `http://localhost:8100`. `tasks.json` is created on first run
 | `DELETE /api/tasks/<id>`             | delete task (and its image files)                     |
 | `POST /api/tasks/<id>/images`        | attach an image — raw bytes, `Content-Type: image/*`  |
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
+| `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
+| `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 
 ```bash
 curl -X POST localhost:8100/api/tasks \
@@ -99,6 +119,9 @@ Task shape:
   "priority": "high | normal | low",
   "pinned": false,
   "archived": false,
+  "prod_shape": true,
+  "reviewed": true,
+  "reviewed_at": "2026-07-31T18:00:00 — present only while reviewed",
   "images": ["a1b2c3d4e5f6-9f3a2b.png"],
   "created_at": "2026-07-31T12:00:00",
   "updated_at": "2026-07-31T12:34:56",
@@ -111,26 +134,44 @@ markdown string of `- [ ]` / `- [x]` lines (handy for agents), which the server 
 and matches to existing items by text. In both cases the server owns `id`,
 `created_at`, and `completed_at` — a subtask is stamped when it flips to done and
 unstamped if unchecked. Same for tasks: flipping status to `done` sets `completed_at`,
-reopening clears it. `PUT {"archived": true}` archives a task (server stamps
-`archived_at`); neither archiving nor pinning bumps `updated_at`.
+reopening clears it.
+
+**Metadata toggles** — `pinned`, `archived`, `reviewed`, and `prod_shape` are flags
+about a task rather than work on it. `PUT {"archived": true}` archives (server stamps
+`archived_at`); `PUT {"reviewed": true}` marks it filmed (stamps `reviewed_at`; any
+later status change clears both); `PUT {"prod_shape": true}` raises the red prod-shape
+warning, `false` clears it. Pin, archive, and filmed toggles don't bump `updated_at`
+and don't emit toasts; prod-shape does both, since it's a warning you want to see.
+
+**Events** — `GET /api/events` returns `{"seq": <latest>, "events": [...]}`, each event
+being `{"seq", "ts", "actor", "action", "task_id", "num", "title", "detail"}`. Without
+`?since=` the list is empty and you just learn the current `seq`; pass
+`?since=<seq>` to get everything after it. The feed lives in memory and is lost on
+restart by design — it only exists to drive the live toasts. Requests from the board's
+own UI carry an `X-Board-Client` header and are tagged `actor: "board"`; everything
+else is `"agent"`, and only agent events become toasts.
 
 **Concurrent writers:** if more than one process/agent writes at once, use the API —
 it's the only path that serializes number assignment. Hand-editing `tasks.json` is fine
 when nothing else is writing (or when the server is down).
 
-## Configuring projects (categories)
+## Configuring the board (`config.json`)
 
-Projects live in `config.json` next to `server.py` — your local setup, not part of the
-repo:
+Projects and the header tagline live in `config.json` next to `server.py` — your local
+setup, not part of the repo:
 
 ```json
 {
+  "tagline": "mission board · home lab",
   "categories": {
     "backend":   { "label": "Backend",   "color": "#d2a8ff" },
     "marketing": { "label": "Marketing", "color": "#ff8a8f" }
   }
 }
 ```
+
+`tagline` is the small line under the TASKCTRL wordmark in the header (defaults to
+`mission board`).
 
 The server re-reads it on every page load, so edits apply on the next refresh — no
 restart. Each category gets its own filter button and accent color (row edge glow,
