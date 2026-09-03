@@ -301,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             "created_at": now,
             "updated_at": now,
         }
+        if body.get("prod_shape"):
+            task["prod_shape"] = True
         if task["status"] == "done":
             task["completed_at"] = now
         with _lock:
@@ -394,6 +396,16 @@ class Handler(BaseHTTPRequestHandler):
                 if bool(body["pinned"]) != bool(task.get("pinned")):
                     changed.append("pinned" if body["pinned"] else "unpinned")
                 task["pinned"] = bool(body["pinned"])
+            if "prod_shape" in body:
+                # red warning: this task's work changes the shape of prod data
+                # (migration or row reinterpretation). Cleared once live on prod.
+                val = bool(body["prod_shape"])
+                if val != bool(task.get("prod_shape")):
+                    changed.append("PROD SHAPE" if val else "prod-shape cleared")
+                if val:
+                    task["prod_shape"] = True
+                else:
+                    task.pop("prod_shape", None)
             if "archived" in body:
                 arch = bool(body["archived"])
                 if arch != bool(task.get("archived")):
@@ -707,6 +719,17 @@ PAGE = r"""<!doctype html>
   .seg button.on.bug     { background: rgba(255,166,87,.15); color: #ffa657; }
   .seg button.on.chore   { background: rgba(147,167,186,.15); color: var(--dim); }
 
+  /* prod data-shape warning */
+  .shape {
+    font: 700 9px var(--mono); letter-spacing: .14em; padding: 2px 7px; margin-right: 8px;
+    border-radius: 2px; border: 1px solid var(--red); color: var(--red);
+    background: rgba(255,95,102,.1); white-space: nowrap;
+    text-shadow: 0 0 6px rgba(255,95,102,.55); animation: shape-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes shape-pulse { 50% { box-shadow: 0 0 12px rgba(255,95,102,.55); } }
+  .row.pshape { border-color: rgba(255,95,102,.45); }
+  .row.pshape:hover { border-color: var(--red); }
+
   /* priority badge */
   .prio { font: 700 9px var(--mono); letter-spacing: .14em; padding: 2px 7px;
           border-radius: 2px; border: 1px solid; white-space: nowrap; text-transform: uppercase; }
@@ -915,27 +938,40 @@ PAGE = r"""<!doctype html>
     .row .chip, .row .when, .row .prio, .row .typ { display: none; }
     .clockbox { display: none; }
   }
-  /* toasts — live feed of agent activity, bottom-right */
+  /* toasts — live feed of agent activity, docked to the right edge like a sidebar */
   .toasts {
-    position: fixed; right: 16px; bottom: 16px; z-index: 400;
-    display: flex; flex-direction: column; gap: 8px;
-    width: min(340px, calc(100vw - 32px));
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 400;
+    display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+    width: min(380px, calc(100vw - 24px));
+    padding: 16px 12px 16px 16px;
+    pointer-events: none; overflow: hidden;
+  }
+  .toasts:not(:empty) {
+    background: linear-gradient(270deg, rgba(0,0,0,.30), transparent 70%);
   }
   .toast {
-    display: flex; align-items: baseline; gap: 8px; padding: 8px 12px;
-    border: 1px solid var(--line2); border-left: 3px solid var(--amber); border-radius: 4px;
+    display: flex; flex-direction: column; gap: 4px; padding: 10px 14px;
+    border: 1px solid var(--line2); border-left: 3px solid var(--amber);
+    border-radius: 6px 0 0 6px; margin-right: -12px;
     background: linear-gradient(180deg, var(--panel2), var(--panel));
     box-shadow: 0 8px 28px rgba(0,0,0,.55);
     font: 12px/1.45 var(--mono); color: var(--dim); cursor: pointer;
-    animation: toast-in .18s ease-out;
+    pointer-events: auto;
+    animation: toast-in .22s ease-out;
   }
   .toast.created { border-left-color: var(--green); }
   .toast.deleted { border-left-color: var(--red); }
-  .toast .tn { color: var(--cyan); flex: none; }
-  .toast .tt { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast .trow { display: flex; align-items: baseline; gap: 8px; }
+  .toast .tn { color: var(--cyan); font-weight: 600; flex: none; }
   .toast .td { color: var(--muted); flex: none; margin-left: auto; }
-  .toast.out { opacity: 0; transform: translateX(12px); transition: opacity .3s, transform .3s; }
-  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+  .toast.created .td { color: var(--green); }
+  .toast.deleted .td { color: var(--red); }
+  .toast .tt {
+    color: var(--ink); font-size: 13px; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .toast.out { opacity: 0; transform: translateX(16px); transition: opacity .3s, transform .3s; }
+  @keyframes toast-in { from { opacity: 0; transform: translateX(16px); } }
 </style>
 </head>
 <body>
@@ -1173,10 +1209,10 @@ function rowHtml(t) {
                         : '✓ ' + n + ' subtask' + (n === 1 ? '' : 's');
   }
   return `
-  <div class="row ${t.status} ${t.archived ? 'arch' : ''} ${t.category ? 'cat-' + t.category : ''}" data-id="${t.id}" title="${t.category || ''}">
+  <div class="row ${t.status} ${t.archived ? 'arch' : ''} ${t.prod_shape ? 'pshape' : ''} ${t.category ? 'cat-' + t.category : ''}" data-id="${t.id}" title="${t.category || ''}">
     <span class="lamp ${t.status}"></span>
     <span class="tnum">T${String(t.num).padStart(2, '0')}</span>
-    <span class="title">${esc(t.title)}</span>
+    <span class="title">${t.prod_shape ? '<span class="shape">PROD SHAPE</span>' : ''}${esc(t.title)}</span>
     ${typ}
     ${prio}
     ${chip}
@@ -1201,7 +1237,8 @@ function render() {
     .filter(t => filters.view !== 'today' || doneToday(t) || stsDoneToday(t))
     // To Film = completed but not yet covered in an update video, whenever it was closed
     .filter(t => filters.view !== 'video' || (t.status === 'done' && !t.reviewed));
-  const matched = visible.filter(t => Object.keys(DIM).every(k => matchDim(t, k)));
+  // prod-shape warnings must never hide behind project/type/priority filters
+  const matched = visible.filter(t => t.prod_shape || Object.keys(DIM).every(k => matchDim(t, k)));
   const pool = matched.filter(t => !t.pinned); // pinned rows live only in the agenda section
   const open = pool.filter(t => t.status !== 'done');
   const done = pool.filter(t => t.status === 'done');
@@ -1335,7 +1372,7 @@ function renderModal() {
   m.innerHTML = `
     <button class="m-close" data-act="close">✕</button>
     <div class="m-head">
-      <div class="m-id">TASK ${String(t.num).padStart(2, '0')} · ${t.id}${t.pinned ? '<span class="m-pin">📌 PINNED</span>' : ''}${t.archived ? '<span class="m-pin" style="color:var(--muted)">🗄 ARCHIVED</span>' : ''}</div>
+      <div class="m-id">TASK ${String(t.num).padStart(2, '0')} · ${t.id}${t.prod_shape ? '<span class="m-pin" style="color:var(--red)">PROD DATA SHAPE</span>' : ''}${t.pinned ? '<span class="m-pin">📌 PINNED</span>' : ''}${t.archived ? '<span class="m-pin" style="color:var(--muted)">🗄 ARCHIVED</span>' : ''}</div>
       <h2 class="m-title">${esc(t.title)}</h2>
       <div style="display:flex;gap:10px;flex-wrap:wrap">${segControl(t.status)}${segType(t.type || '')}${Object.keys(CAT_LABEL).length ? segCat(t.category || '') : ''}${segPrio(prioOf(t))}</div>
     </div>
@@ -1358,6 +1395,7 @@ function renderModal() {
       <button class="danger" data-act="delete">Delete</button>
       <button data-act="archive">${t.archived ? 'Unarchive' : '🗄 Archive'}</button>
       ${t.status === 'done' ? `<button data-act="review">${t.reviewed ? 'Unmark filmed' : '🎥 Filmed'}</button>` : ''}
+      <button data-act="shape" ${t.prod_shape ? 'style="color:var(--red);border-color:var(--red)"' : ''}>${t.prod_shape ? 'Clear shape' : 'Prod shape'}</button>
       <button data-act="pin">${t.pinned ? 'Unpin' : '📌 Pin'}</button>
       <button data-act="edit">Edit</button>
     </div>`;
@@ -1498,6 +1536,11 @@ document.addEventListener('click', async ev => {
     else if (a === 'pin') {
       const t = tasks.find(x => x.id === modalId);
       await api('PUT', '/api/tasks/' + modalId, { pinned: !(t && t.pinned) });
+      await refresh();
+    }
+    else if (a === 'shape') {
+      const t = tasks.find(x => x.id === modalId);
+      await api('PUT', '/api/tasks/' + modalId, { prod_shape: !(t && t.prod_shape) });
       await refresh();
     }
     else if (a === 'archive') {
@@ -1699,9 +1742,11 @@ function showToast(e) {
   const el = document.createElement('div');
   el.className = 'toast ' + e.action;
   el.innerHTML =
-    `<span class="tn">T${String(e.num).padStart(2, '0')}</span>` +
-    `<span class="tt">${esc(e.title)}</span>` +
-    `<span class="td">${esc(e.detail || e.action)}</span>`;
+    `<div class="trow">` +
+      `<span class="tn">T${String(e.num).padStart(2, '0')}</span>` +
+      `<span class="td">${esc(e.detail || e.action)}</span>` +
+    `</div>` +
+    `<div class="tt">${esc(e.title)}</div>`;
   const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
   el.onclick = () => {
     dismiss();
