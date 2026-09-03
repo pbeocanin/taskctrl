@@ -5,12 +5,24 @@ description: Maintain the TASKCTRL board for all substantive work in this projec
 
 # TASKCTRL board
 
-Work is tracked on a TASKCTRL board (default `http://localhost:8100`, backed by
-`tasks.json` in the taskctrl directory). **All writes go through the REST API** —
-multiple agents may work concurrently, and the server is the only thing that
-serializes writes and assigns task numbers safely; two agents editing the JSON
-directly WILL mint duplicate task numbers. Reading the file directly is always fine,
-and the page polls every 15s so API writes show up on their own.
+## Setup — the only two lines to edit when installing this skill globally
+
+- **Board URL:** `http://localhost:8100`
+- **Board directory** (holds `server.py`, `tasks.json`, `config.json`): the directory
+  this repo was cloned to — e.g. `~/taskctrl`
+
+Inside the taskctrl repo this skill works as-is. Copied to `~/.claude/skills/taskctrl/`
+it applies to every project; fill in the two lines above so the paths below resolve.
+Install steps live in the repo's `SETUP.md`.
+
+## What this is
+
+Work is tracked on a TASKCTRL board at the board URL, backed by `tasks.json` in the
+board directory. **All writes go through the REST API** — multiple agents may work
+concurrently, and the server is the only thing that serializes writes and assigns task
+numbers safely; two agents editing the JSON directly WILL mint duplicate task numbers.
+Reading the file directly is always fine, and the page polls every 15s so API writes
+show up on their own.
 
 ## The workflow
 
@@ -63,12 +75,13 @@ else, it gets a task.
   has been filmed/covered (or use `POST /api/tasks/mark-reviewed` when they say
   "everything's filmed"). The server stamps `reviewed_at`, doesn't bump `updated_at`,
   and clears the flag on any later status change.
-- **prod_shape** — red warning that this task's work changes the shape of production
-  data (a migration, a column reinterpretation, a row re-encoding). Set
-  `PUT {"prod_shape": true}` when starting such work — it's the one flag you SHOULD
-  set on your own initiative, because it exists to warn the user. The row gets a
-  pulsing `PROD SHAPE` badge and bypasses all board filters. Clear it (`false`) once
-  the change is live on prod.
+- **prod_shape** — a red "handle with care" warning: this task changes the shape of
+  data that already exists in production (a schema migration, reinterpreting a
+  column, re-encoding stored rows). Set `PUT {"prod_shape": true}` when starting such
+  work — it's the one flag you SHOULD set on your own initiative, because it exists
+  to warn the user before they deploy. The row gets a pulsing `PROD SHAPE` badge and
+  bypasses all board filters. Clear it (`false`) once the change is live. Projects
+  without production data can ignore this flag entirely.
 - **completed_at** — server-managed: stamped when status flips to `done`, cleared on
   reopen. Powers the board's Today view ("what was closed today"). Never set it in an
   API body — it's ignored there; status changes are the only way it moves.
@@ -97,20 +110,44 @@ notes for prose, findings, and mechanisms.
 
 ## Updating the board — API first
 
+All paths are relative to the board URL from the Setup block.
+
 - **Create:** `POST /api/tasks` with any subset of fields — the server assigns `id`,
   `num`, and timestamps. Never pick a `num` yourself.
 - **Update:** `PUT /api/tasks/<id>` with just the fields to change (partial updates
   preserve everything else). The server bumps `updated_at` (except pin-only toggles).
 - **Delete:** `DELETE /api/tasks/<id>`.
 - **Bulk filmed:** `POST /api/tasks/mark-reviewed` flags every done-but-unreviewed task.
+- **Find an id:** `GET /api/tasks` and match on `num` (task numbers are what the user
+  says; ids are what the API wants).
+
+```bash
+# start work
+curl -s -X POST http://localhost:8100/api/tasks -H 'Content-Type: application/json' \
+  -d '{"title": "Rate-limit the search endpoint", "category": "api", "type": "feature",
+       "status": "doing", "reasoning": "One client saturated /search over the weekend.",
+       "subtasks": "- [ ] pick a strategy\n- [ ] middleware\n- [ ] load-test"}'
+
+# progress: check items off by resending the checklist with [x]
+curl -s -X PUT http://localhost:8100/api/tasks/<id> -H 'Content-Type: application/json' \
+  -d '{"subtasks": "- [x] pick a strategy\n- [x] middleware\n- [ ] load-test"}'
+
+# finish: notes + status in one call
+curl -s -X PUT http://localhost:8100/api/tasks/<id> -H 'Content-Type: application/json' \
+  -d '{"status": "done", "notes": "**How it works**\n1. ..."}'
+```
+
+Send JSON bodies with `-d @file` or a heredoc when the notes are long — quoting
+markdown inline in a shell gets fragile fast.
 
 Every API write shows up on the user's open board as a live toast within a few
 seconds, naming the task and what changed — so no-op PUTs are fine (they make no
 noise), but avoid churny writes; each one is a notification.
 
 Direct edits to `tasks.json` are the fallback only for when the server is down: edit
-the file (it's the source of truth), then restart with
-`python3 server.py` (from the taskctrl directory, backgrounded). When editing by hand:
+the file (it's the source of truth), then bring the server back (`systemctl --user
+restart taskctrl` if it was installed as a service, otherwise `python3 server.py` from
+the board directory, backgrounded). When editing by hand:
 preserve other tasks exactly, keep the `{"tasks": [...]}` shape, use a fresh
 12-lowercase-hex `id`, set `num` to max(num)+1, timestamps are local time
 (`YYYY-MM-DDTHH:MM:SS`, no timezone). Hand-written subtasks must use the structured
@@ -142,6 +179,9 @@ that use the old one, so if the user renames a project, also update the `categor
 field on its existing tasks (via the API).
 
 ## How the user references tasks and subtasks
+
+Suggested vocabulary — the board displays these numbers, so this is how people
+naturally talk about it:
 
 - **"task 3" / "T03"** = the task with `num: 3`, regardless of status or position.
 - **"subtask 2 of task 3"** = the 2nd item in that task's `subtasks` array, counting

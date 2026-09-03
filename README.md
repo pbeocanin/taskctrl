@@ -77,6 +77,13 @@ python3 server.py
 
 The server binds `0.0.0.0:8100`, so the board is reachable from other machines on your
 network as well as `http://localhost:8100`. `tasks.json` is created on first run.
+`TASKCTRL_PORT` and `TASKCTRL_HOST` override the defaults.
+
+That gets you a board for as long as the terminal is open. For the real install —
+running as a service, your projects configured, and Claude Code using it from every
+repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
+
+> Read SETUP.md and set up TASKCTRL for me.
 
 ## REST API
 
@@ -188,9 +195,15 @@ that teaches Claude Code the whole workflow: when to create tasks, how to keep s
 and statuses current while working, the quality bar for notes (could you explain the
 feature to a colleague from the notes alone?), and why all writes go through the API.
 
-- Working inside this repo: Claude Code picks the skill up automatically.
-- Board running elsewhere / used across projects: copy it to
-  `~/.claude/skills/taskctrl/` and adjust the board URL/path at the top.
+- **Inside this repo** Claude Code picks the skill up automatically.
+- **From every project** — the way it's meant to be used — copy it to
+  `~/.claude/skills/taskctrl/`, fill in the two lines of the Setup block at the top
+  (board URL, board directory), and add a line to `~/.claude/CLAUDE.md` telling Claude
+  to load it whenever substantive work starts. [SETUP.md](SETUP.md) walks through all
+  of that, and the "set up TASKCTRL for me" prompt above makes Claude do it.
+
+Without the CLAUDE.md line the skill is merely *available*; Claude will use it when it
+guesses the task is board-worthy, which is less often than you'd like.
 
 ## License
 
