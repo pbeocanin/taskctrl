@@ -6,6 +6,8 @@ request, so edits made directly to it (by hand or by Claude) show up on the
 next refresh without restarting the server.
 
 Run:  python3 server.py   (binds 0.0.0.0:8100 — reachable from your LAN)
+      TASKCTRL_PORT=9000 python3 server.py   to use another port
+      TASKCTRL_HOST=127.0.0.1 ...            to keep it off the LAN
 """
 
 import json
@@ -17,8 +19,8 @@ import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST = "0.0.0.0"
-PORT = 8100
+HOST = os.environ.get("TASKCTRL_HOST", "0.0.0.0")
+PORT = int(os.environ.get("TASKCTRL_PORT", "8100"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "tasks.json")
 
