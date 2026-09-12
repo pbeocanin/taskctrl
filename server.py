@@ -1922,15 +1922,15 @@ $('#bench-x').onclick = closeBench;
 benchBd.addEventListener('click', ev => { if (ev.target === benchBd) closeBench(); });
 benchDrop.onclick = () => $('#benchfile').click();
 $('#benchfile').onchange = async ev => { await uploadBench(ev.target.files); ev.target.value = ''; };
-benchDrop.addEventListener('dragover', ev => { ev.preventDefault(); benchDrop.classList.add('dragover'); });
+// one drop handler on the drawer only — a drop on the zone bubbles up here, so a
+// second listener on the zone itself would upload every file twice
+benchDrop.addEventListener('dragover', () => benchDrop.classList.add('dragover'));
 benchDrop.addEventListener('dragleave', () => benchDrop.classList.remove('dragover'));
-benchDrop.addEventListener('drop', ev => {
+$('#bench').addEventListener('dragover', ev => ev.preventDefault());
+$('#bench').addEventListener('drop', ev => {
   ev.preventDefault(); benchDrop.classList.remove('dragover');
   uploadBench(ev.dataTransfer.files);
 });
-// a drop anywhere on the drawer (not just the zone) still counts — same as the task modal
-$('#bench').addEventListener('dragover', ev => ev.preventDefault());
-$('#bench').addEventListener('drop', ev => { ev.preventDefault(); uploadBench(ev.dataTransfer.files); });
 $('#review-all').onclick = async ev => {
   ev.stopPropagation(); // panel-head clicks shouldn't fall through to row handling
   await api('POST', '/api/tasks/mark-reviewed');
