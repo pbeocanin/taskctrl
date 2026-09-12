@@ -11,13 +11,16 @@ Run:  python3 server.py   (binds 0.0.0.0:8100 — reachable from your LAN)
 """
 
 import json
+import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, unquote
 
 HOST = os.environ.get("TASKCTRL_HOST", "0.0.0.0")
 PORT = int(os.environ.get("TASKCTRL_PORT", "8100"))
@@ -85,6 +88,53 @@ def sniff_image_ext(data):
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+# ---- bench: a plain drop folder (~/bench) reachable from the board -----------
+BENCH_DIR = os.environ.get("TASKCTRL_BENCH") or os.path.expanduser("~/bench")
+MAX_BENCH_BYTES = 500 * 1024 * 1024
+BENCH_HIDE = {"node_modules", "lighthouse", ".git", "__pycache__"}
+
+
+def bench_safe_name(raw):
+    """Strip any path and control chars; refuse dotfiles and empty names."""
+    name = os.path.basename((raw or "").replace("\\", "/")).strip()
+    name = re.sub(r"[\x00-\x1f/]", "", name)
+    if not name or name.startswith("."):
+        return None
+    return name[:200]
+
+
+def bench_unique(name):
+    """foo.csv → foo-2.csv, foo-3.csv … never overwrite an existing bench file."""
+    base, dot, ext = name.rpartition(".")
+    if not dot or not base:
+        base, ext = name, ""
+    cand, n = name, 1
+    while os.path.exists(os.path.join(BENCH_DIR, cand)):
+        n += 1
+        cand = f"{base}-{n}.{ext}" if ext else f"{base}-{n}"
+    return cand
+
+
+def bench_listing():
+    out = []
+    try:
+        entries = os.scandir(BENCH_DIR)
+    except OSError:
+        return out
+    with entries:
+        for e in entries:
+            if e.name in BENCH_HIDE or e.name.startswith("."):
+                continue
+            try:
+                st = e.stat()
+            except OSError:
+                continue
+            out.append({"name": e.name, "dir": e.is_dir(), "size": st.st_size,
+                        "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
 
 
 def load_db():
@@ -248,6 +298,10 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 evs = [] if since is None else [e for e in _events if e["seq"] > since]
                 self._json(200, {"seq": _event_seq, "events": evs})
+        elif self.path == "/api/bench":
+            self._json(200, {"dir": BENCH_DIR, "files": bench_listing()})
+        elif self.path.startswith("/bench/"):
+            return self._bench_download(self.path[len("/bench/"):])
         elif self.path.startswith("/images/"):
             name = self.path[len("/images/"):]
             path = os.path.join(IMAGES_DIR, name)
@@ -278,6 +332,8 @@ class Handler(BaseHTTPRequestHandler):
                 if hit:
                     save_db(db)
             return self._json(200, {"marked": len(hit)})
+        if self.path == "/api/bench":
+            return self._bench_upload()
         m = re.fullmatch(r"/api/tasks/([\w-]+)/images", self.path)
         if m:
             return self._upload_image(m.group(1))
@@ -340,6 +396,50 @@ class Handler(BaseHTTPRequestHandler):
             save_db(db)
             add_event(self._actor(), "updated", task, "image added")
         self._json(201, task)
+
+    def _bench_upload(self):
+        # raw bytes in the body, original filename in X-Filename (URL-encoded)
+        length = int(self.headers.get("Content-Length", 0))
+        if length == 0:
+            return self._json(400, {"error": "empty body — send raw file bytes"})
+        if length > MAX_BENCH_BYTES:
+            return self._json(413, {"error": "file too large (500 MB cap)"})
+        name = bench_safe_name(unquote(self.headers.get("X-Filename") or ""))
+        if not name:
+            return self._json(400, {"error": "X-Filename header required (no dotfiles)"})
+        os.makedirs(BENCH_DIR, exist_ok=True)
+        with _lock:  # the unique-name check and the create must not interleave
+            name = bench_unique(name)
+            fd = os.open(os.path.join(BENCH_DIR, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        remaining, tmp_err = length, None
+        with os.fdopen(fd, "wb") as f:
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 1 << 20))
+                if not chunk:
+                    tmp_err = "connection closed mid-upload"
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        if tmp_err:
+            os.unlink(os.path.join(BENCH_DIR, name))
+            return self._json(400, {"error": tmp_err})
+        self._json(201, {"name": name, "size": length, "dir": BENCH_DIR})
+
+    def _bench_download(self, raw):
+        name = bench_safe_name(unquote(raw))
+        path = os.path.join(BENCH_DIR, name) if name else None
+        if not name or name in BENCH_HIDE or not os.path.isfile(path):
+            return self._json(404, {"error": "not found"})
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(name)}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile)
 
     def do_PUT(self):
         tid = self._task_id()
@@ -910,6 +1010,42 @@ PAGE = r"""<!doctype html>
   .addimg:hover { color: var(--cyan); border-color: var(--cyan-dim); }
   .modal.dragover { border-color: var(--cyan); box-shadow: 0 0 30px rgba(65,216,247,.3); }
 
+  /* bench drawer — drop files into ~/bench */
+  .bench { padding: 22px 24px 24px; }
+  .bench-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .bench-head .bt { font: 700 13px var(--mono); letter-spacing: .22em; color: var(--cyan); text-transform: uppercase; }
+  .bench-head .bp { font: 11px var(--mono); color: var(--muted); letter-spacing: .06em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bench-head .bx { padding: 4px 9px; font-size: 11px; }
+  .dropzone {
+    display: grid; place-content: center; min-height: 110px; text-align: center;
+    border: 1px dashed var(--line2); border-radius: 3px; background: var(--inset);
+    color: var(--muted); font: 600 10px/1.9 var(--mono); letter-spacing: .18em; text-transform: uppercase;
+    cursor: pointer; transition: all .12s;
+  }
+  .dropzone:hover, .dropzone.dragover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 24px rgba(65,216,247,.18); }
+  .bench-prog { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .bench-prog:empty { display: none; }
+  .bp-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font: 11px var(--mono); color: var(--dim); }
+  .bp-row .bp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bp-row .bp-pct { color: var(--cyan); font-variant-numeric: tabular-nums; }
+  .bp-row.err .bp-pct { color: var(--red); }
+  .bp-row .bp-bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .bp-row .bp-bar i { display: block; height: 100%; width: 0; background: var(--cyan); transition: width .1s; }
+  .bp-row.err .bp-bar i { background: var(--red); }
+  .bench-list { margin-top: 16px; border-top: 1px solid var(--line); max-height: 46vh; overflow-y: auto; }
+  .bf {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: baseline;
+    padding: 7px 4px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--ink);
+    text-decoration: none;
+  }
+  .bf:hover { background: var(--panel2); color: var(--cyan); }
+  .bf .bn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bf .bn.dir { color: var(--dim); }
+  .bf .bs, .bf .bw { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bench-empty { padding: 20px 4px; font: 11px var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
+  .console .benchbtn { align-self: center; margin-right: 10px; }
+  @media (max-width: 760px) { .bf .bw { display: none; } }
+
   /* lightbox */
   .lightbox {
     position: fixed; inset: 0; z-index: 300; display: none;
@@ -963,6 +1099,7 @@ PAGE = r"""<!doctype html>
   }
   .toast.created { border-left-color: var(--green); }
   .toast.deleted { border-left-color: var(--red); }
+  .toast.bench { border-left-color: var(--cyan); }
   .toast .trow { display: flex; align-items: baseline; gap: 8px; }
   .toast .tn { color: var(--cyan); font-weight: 600; flex: none; }
   .toast .td { color: var(--muted); flex: none; margin-left: auto; }
@@ -989,6 +1126,7 @@ PAGE = r"""<!doctype html>
       <div class="ro done"><span class="l">COMPLETE</span><span class="v" id="ro-done">–</span></div>
     </div>
     <div class="clockbox"><span class="t" id="clock-t">--:--:--</span><span class="d" id="clock-d"></span></div>
+    <button class="benchbtn" id="bench-btn">⬡ Bench</button>
     <button class="primary" id="new-btn">+ New Task</button>
   </header>
 
@@ -1047,7 +1185,20 @@ PAGE = r"""<!doctype html>
   <button class="lb-x" data-lb="x">✕</button>
   <div class="lb-count" id="lb-count"></div>
 </div>
+<div class="backdrop" id="bench-bd">
+  <div class="modal bench" id="bench">
+    <div class="bench-head">
+      <span class="bt">⬡ Bench</span>
+      <span class="bp" id="bench-path"></span>
+      <button class="bx" id="bench-x">✕</button>
+    </div>
+    <div class="dropzone" id="bench-drop">drop files here<br>paste · or click to pick<br><span style="opacity:.6">any type · 500 mb cap · lands in ~/bench</span></div>
+    <div class="bench-prog" id="bench-prog"></div>
+    <div class="bench-list" id="bench-list"></div>
+  </div>
+</div>
 <input type="file" id="imgfile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+<input type="file" id="benchfile" multiple hidden>
 
 <script>
 let tasks = [];
@@ -1667,12 +1818,18 @@ document.addEventListener('keydown', ev => {
     $('[data-stsave]')?.click();
     return;
   }
+  if (ev.key === 'Escape' && benchOpen()) { closeBench(); return; }
   if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
 });
 
 /* image intake: paste, drag-drop, file picker (view mode of an existing task only) */
 document.addEventListener('paste', ev => {
+  if (benchOpen()) {
+    const files = [...(ev.clipboardData?.files || [])];
+    if (files.length) { ev.preventDefault(); uploadBench(files); }
+    return;
+  }
   if (!modalId || editMode) return;
   const files = [...(ev.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
   if (files.length) { ev.preventDefault(); uploadImages(files); }
@@ -1695,6 +1852,85 @@ modalEl.addEventListener('drop', ev => {
 $('#imgfile').onchange = async ev => { await uploadImages([...ev.target.files]); ev.target.value = ''; };
 
 $('#new-btn').onclick = () => { modalId = ''; editMode = false; renderModal(); };
+
+/* ---------- bench drawer ---------- */
+const benchBd = $('#bench-bd'), benchDrop = $('#bench-drop');
+const benchOpen = () => benchBd.classList.contains('show');
+const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
+  : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
+
+async function loadBench() {
+  const d = await api('GET', '/api/bench');
+  $('#bench-path').textContent = d.dir;
+  const list = $('#bench-list');
+  if (!d.files.length) { list.innerHTML = '<div class="bench-empty">bench is empty</div>'; return; }
+  list.innerHTML = d.files.map(f => f.dir
+    ? `<div class="bf"><span class="bn dir">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(f.mtime.replace('T', ' ').slice(0, 16))}</span></div>`
+    : `<a class="bf" href="/bench/${encodeURIComponent(f.name)}" download="${esc(f.name)}" title="download">` +
+      `<span class="bn">${esc(f.name)}</span><span class="bs">${fmtSize(f.size)}</span>` +
+      `<span class="bw">${esc(f.mtime.replace('T', ' ').slice(0, 16))}</span></a>`).join('');
+}
+function openBench() { benchBd.classList.add('show'); loadBench().catch(e => alert(e.message)); }
+function closeBench() { benchBd.classList.remove('show'); }
+
+/* XHR rather than fetch so the progress bar is real — bench files run to hundreds of MB */
+function uploadBenchOne(f) {
+  const row = document.createElement('div');
+  row.className = 'bp-row';
+  row.innerHTML = `<span class="bp-name">${esc(f.name)}</span><span class="bp-pct">0%</span><div class="bp-bar"><i></i></div>`;
+  $('#bench-prog').appendChild(row);
+  const pct = row.querySelector('.bp-pct'), bar = row.querySelector('.bp-bar i');
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/bench');
+    xhr.setRequestHeader('Content-Type', f.type || 'application/octet-stream');
+    xhr.setRequestHeader('X-Filename', encodeURIComponent(f.name));
+    xhr.setRequestHeader('X-Board-Client', '1');
+    xhr.upload.onprogress = ev => {
+      if (!ev.lengthComputable) return;
+      const p = Math.round(ev.loaded / ev.total * 100);
+      pct.textContent = p + '%'; bar.style.width = p + '%';
+    };
+    xhr.onload = () => {
+      let res = {};
+      try { res = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status === 201) {
+        pct.textContent = 'saved as ' + res.name; bar.style.width = '100%';
+        showToast({ action: 'bench', title: res.name, detail: fmtSize(res.size) + ' → bench' });
+        setTimeout(() => row.remove(), 2500);
+      } else {
+        row.classList.add('err'); pct.textContent = res.error || ('HTTP ' + xhr.status);
+      }
+      resolve();
+    };
+    xhr.onerror = () => { row.classList.add('err'); pct.textContent = 'network error'; resolve(); };
+    xhr.send(f);
+  });
+}
+async function uploadBench(files) {
+  files = [...files];
+  if (!files.length) return;
+  for (const f of files) {
+    if (f.size > 500 * 1024 * 1024) { alert(f.name + ' is over the 500 MB cap'); continue; }
+    await uploadBenchOne(f);
+  }
+  await loadBench();
+}
+
+$('#bench-btn').onclick = openBench;
+$('#bench-x').onclick = closeBench;
+benchBd.addEventListener('click', ev => { if (ev.target === benchBd) closeBench(); });
+benchDrop.onclick = () => $('#benchfile').click();
+$('#benchfile').onchange = async ev => { await uploadBench(ev.target.files); ev.target.value = ''; };
+benchDrop.addEventListener('dragover', ev => { ev.preventDefault(); benchDrop.classList.add('dragover'); });
+benchDrop.addEventListener('dragleave', () => benchDrop.classList.remove('dragover'));
+benchDrop.addEventListener('drop', ev => {
+  ev.preventDefault(); benchDrop.classList.remove('dragover');
+  uploadBench(ev.dataTransfer.files);
+});
+// a drop anywhere on the drawer (not just the zone) still counts — same as the task modal
+$('#bench').addEventListener('dragover', ev => ev.preventDefault());
+$('#bench').addEventListener('drop', ev => { ev.preventDefault(); uploadBench(ev.dataTransfer.files); });
 $('#review-all').onclick = async ev => {
   ev.stopPropagation(); // panel-head clicks shouldn't fall through to row handling
   await api('POST', '/api/tasks/mark-reviewed');
@@ -1745,13 +1981,14 @@ function showToast(e) {
   el.className = 'toast ' + e.action;
   el.innerHTML =
     `<div class="trow">` +
-      `<span class="tn">T${String(e.num).padStart(2, '0')}</span>` +
+      `<span class="tn">${e.action === 'bench' ? 'BENCH' : 'T' + String(e.num).padStart(2, '0')}</span>` +
       `<span class="td">${esc(e.detail || e.action)}</span>` +
     `</div>` +
     `<div class="tt">${esc(e.title)}</div>`;
   const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
   el.onclick = () => {
     dismiss();
+    if (e.action === 'bench') { openBench(); return; }
     if (e.action !== 'deleted' && tasks.find(t => t.id === e.task_id)) {
       modalId = e.task_id; editMode = false; stEdit = null; renderModal();
     }

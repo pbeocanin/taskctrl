@@ -62,6 +62,12 @@ write call-ready notes when it ships.
   mouse-tracking tilt, staggered fly-in, holo sweep, breathing active glow, and a
   chromatic glitch on click. Flat filter rows below 1280px. Exclusive filters for
   project / type / priority / view (Today, Archived), persisted in localStorage.
+- **Bench drawer** — a `⬡ Bench` button in the header opens a drop zone for a plain
+  scratch folder (`~/bench` by default, `TASKCTRL_BENCH` to override). Drop, paste, or
+  pick files of any type from any machine on the LAN and they land there under their
+  original name (a clash gets a `-2`, `-3` suffix, never an overwrite). Real upload
+  progress per file, a toast on arrival, and a newest-first listing with download
+  links. 500 MB cap. Delete is deliberately absent — that's a shell job.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ![Task view](docs/task.png)
@@ -97,6 +103,9 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
 | `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
+| `GET /api/bench`                     | bench folder listing (name, size, mtime; newest first) |
+| `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded); 500 MB cap |
+| `GET /bench/<file>`                  | download a bench file                                 |
 
 ```bash
 curl -X POST localhost:8100/api/tasks \
