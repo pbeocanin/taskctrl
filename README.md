@@ -65,9 +65,13 @@ write call-ready notes when it ships.
 - **Bench drawer** — a `⬡ Bench` button in the header opens a drop zone for a plain
   scratch folder (`~/bench` by default, `TASKCTRL_BENCH` to override). Drop, paste, or
   pick files of any type from any machine on the LAN and they land there under their
-  original name (a clash gets a `-2`, `-3` suffix, never an overwrite). Real upload
-  progress per file, a toast on arrival, and a newest-first listing with download
-  links. 500 MB cap. Delete is deliberately absent — that's a shell job.
+  original name (a clash gets a `-2`, `-3` suffix, never an overwrite). Subfolders
+  are browsable — click a folder row to open it (breadcrumb / `../` to go back), and
+  whatever's open is where drops, pastes and picks land; or drag a file straight onto
+  a folder row to drop it in there without opening it. The open folder is remembered
+  across reloads. Real upload progress per file, a toast on arrival, and a newest-first
+  listing with download links. 500 MB cap. Folders can't be created from the browser
+  and delete is deliberately absent — those are shell jobs.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ![Task view](docs/task.png)
@@ -103,9 +107,9 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
 | `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
-| `GET /api/bench`                     | bench folder listing (name, size, mtime; newest first) |
-| `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded); 500 MB cap |
-| `GET /bench/<file>`                  | download a bench file                                 |
+| `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then newest files) |
+| `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
+| `GET /bench/<path/to/file>`          | download a bench file                                 |
 
 ```bash
 curl -X POST localhost:8100/api/tasks \
