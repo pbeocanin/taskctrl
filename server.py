@@ -1068,6 +1068,7 @@ PAGE = r"""<!doctype html>
   body.bench-mode .bench { display: grid; grid-template-columns: minmax(300px, 2fr) 3fr; gap: 22px; align-items: start; }
   .bench-side { min-width: 0; }
   .bench-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .bench-head .bback { padding: 4px 10px; font-size: 10px; }
   .bench-head .bt { font: 700 13px var(--mono); letter-spacing: .22em; color: var(--cyan); text-transform: uppercase; }
   .bench-head .bp { font: 11px var(--mono); color: var(--muted); letter-spacing: .06em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bench-head .bp button { all: unset; cursor: pointer; color: var(--dim); }
@@ -1268,6 +1269,7 @@ PAGE = r"""<!doctype html>
   <section class="bench" id="bench">
     <div class="bench-side">
       <div class="bench-head">
+        <button class="bback" id="bench-back" title="back">‹ Back</button>
         <span class="bt">⬡ Bench</span>
         <span class="bp" id="bench-path"></span>
       </div>
@@ -1982,7 +1984,9 @@ function benchSyncUrl(push) {
   if (benchCwd) u.set('p', benchCwd);
   if (benchFile) u.set('f', benchFile);
   const url = '/bench' + (u.toString() ? '?' + u : '');
-  if (url !== location.pathname + location.search) history[push ? 'pushState' : 'replaceState'](null, '', url);
+  if (url === location.pathname + location.search) return;
+  const depth = (history.state?.depth || 0) + (push ? 1 : 0);
+  history[push ? 'pushState' : 'replaceState']({ depth }, '', url);
 }
 
 function renderBenchCrumb(rel) {
@@ -2148,6 +2152,8 @@ if (BENCH_MODE) {
     const b = ev.target.closest('button[data-rel]');
     if (b) benchGo(b.dataset.rel).catch(e => alert(e.message));
   });
+  // ‹ Back walks the folders/files opened on this page, then leaves for the board
+  $('#bench-back').onclick = () => { if (history.state?.depth > 0) history.back(); else location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
   });
