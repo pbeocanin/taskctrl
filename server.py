@@ -311,7 +311,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routes --------------------------------------------------------
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/?"):
+        if self.path in ("/", "/bench") or self.path.startswith(("/?", "/bench?")):
+            # same page for the board and the bench; the JS picks the mode from the path
             tagline = str(load_config().get("tagline") or "mission board")
             page = (PAGE
                     .replace("__CATEGORIES__", json.dumps(categories()))
@@ -462,7 +463,10 @@ class Handler(BaseHTTPRequestHandler):
         self._json(201, {"name": name, "path": rel, "size": length, "dir": BENCH_DIR})
 
     def _bench_download(self, raw):
-        # /bench/<file> or /bench/<sub>/<folder>/<file>
+        # /bench/<file> or /bench/<sub>/<folder>/<file>, optionally ?inline=1 for
+        # the bench page's preview pane
+        raw, _, query = raw.partition("?")
+        inline = "inline=1" in query.split("&")
         raw = unquote(raw)
         folder, _, leaf = raw.rpartition("/")
         rel, name = bench_safe_rel(folder), bench_safe_name(leaf)
@@ -470,11 +474,18 @@ class Handler(BaseHTTPRequestHandler):
         if not path or name in BENCH_HIDE or not os.path.isfile(path):
             return self._json(404, {"error": "not found"})
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if inline:
+            # images keep their type; everything else is shown as plain text so an
+            # .html or .svg dropped in bench can never run scripts on the board's origin
+            if not ctype.startswith("image/") or ctype == "image/svg+xml":
+                ctype = "text/plain; charset=utf-8"
         size = os.path.getsize(path)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(name)}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Disposition",
+                         ("inline" if inline else "attachment") + f"; filename*=UTF-8''{quote(name)}")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(path, "rb") as f:
@@ -680,12 +691,13 @@ PAGE = r"""<!doctype html>
   .clockbox .d { font: 10px var(--mono); letter-spacing: .25em; color: var(--muted); }
 
   /* ---------- buttons ---------- */
-  button {
+  button, a.btnlink {
     font: 600 12px var(--mono); letter-spacing: .12em; text-transform: uppercase;
     color: var(--dim); background: var(--panel2); border: 1px solid var(--line2);
     border-radius: 3px; padding: 8px 14px; cursor: pointer; transition: all .12s;
   }
-  button:hover { color: var(--cyan); border-color: var(--cyan-dim); box-shadow: 0 0 10px rgba(65,216,247,.15); }
+  a.btnlink { display: inline-flex; align-items: center; text-decoration: none; }
+  button:hover, a.btnlink:hover { color: var(--cyan); border-color: var(--cyan-dim); box-shadow: 0 0 10px rgba(65,216,247,.15); }
   button.primary {
     color: #032027; background: var(--cyan); border-color: var(--cyan);
     box-shadow: 0 0 14px rgba(65,216,247,.35);
@@ -1049,8 +1061,12 @@ PAGE = r"""<!doctype html>
   .addimg:hover { color: var(--cyan); border-color: var(--cyan-dim); }
   .modal.dragover { border-color: var(--cyan); box-shadow: 0 0 30px rgba(65,216,247,.3); }
 
-  /* bench drawer — drop files into ~/bench */
-  .bench { padding: 22px 24px 24px; }
+  /* bench page (/bench) — file list + preview pane, drop files into ~/bench */
+  .bench { display: none; }
+  body.bench-mode .hud, body.bench-mode .panel, body.bench-mode .readouts, body.bench-mode #new-btn { display: none; }
+  body.bench-mode .wrap { max-width: 1500px; margin: 0 auto; }
+  body.bench-mode .bench { display: grid; grid-template-columns: minmax(300px, 2fr) 3fr; gap: 22px; align-items: start; }
+  .bench-side { min-width: 0; }
   .bench-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
   .bench-head .bt { font: 700 13px var(--mono); letter-spacing: .22em; color: var(--cyan); text-transform: uppercase; }
   .bench-head .bp { font: 11px var(--mono); color: var(--muted); letter-spacing: .06em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1058,9 +1074,8 @@ PAGE = r"""<!doctype html>
   .bench-head .bp button:hover { color: var(--cyan); text-decoration: underline; }
   .bench-head .bp .sep { margin: 0 5px; opacity: .5; }
   .bench-head .bp .cur { color: var(--cyan); }
-  .bench-head .bx { padding: 4px 9px; font-size: 11px; }
   .dropzone {
-    display: grid; place-content: center; min-height: 110px; text-align: center;
+    display: grid; place-content: center; min-height: 96px; text-align: center;
     border: 1px dashed var(--line2); border-radius: 3px; background: var(--inset);
     color: var(--muted); font: 600 10px/1.9 var(--mono); letter-spacing: .18em; text-transform: uppercase;
     cursor: pointer; transition: all .12s;
@@ -1075,23 +1090,54 @@ PAGE = r"""<!doctype html>
   .bp-row .bp-bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
   .bp-row .bp-bar i { display: block; height: 100%; width: 0; background: var(--cyan); transition: width .1s; }
   .bp-row.err .bp-bar i { background: var(--red); }
-  .bench-list { margin-top: 16px; border-top: 1px solid var(--line); max-height: 46vh; overflow-y: auto; }
+  .bench-list { margin-top: 16px; border-top: 1px solid var(--line); }
   .bf {
-    display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: baseline;
-    padding: 7px 4px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--ink);
-    text-decoration: none;
+    display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; align-items: baseline;
+    padding: 6px 4px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--ink);
+    cursor: pointer;
   }
   .bf:hover { background: var(--panel2); color: var(--cyan); }
+  .bf.sel { background: var(--panel2); box-shadow: inset 2px 0 0 var(--cyan); }
+  .bf.sel .bn { color: var(--cyan); }
   .bf .bn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bf .bn.dir { color: var(--dim); }
-  .bf.dir { cursor: pointer; }
   .bf.dir:hover .bn { color: var(--cyan); }
   .bf.dir.dragover { background: var(--panel2); box-shadow: inset 0 0 0 1px var(--cyan); }
-  .bf.dir.dragover .bn { color: var(--cyan); }
-  .bf.dir.dragover .bw { color: var(--cyan); }
+  .bf.dir.dragover .bn, .bf.dir.dragover .bw { color: var(--cyan); }
   .bf .bs, .bf .bw { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bf .bd { color: var(--muted); text-decoration: none; padding: 0 3px; font-size: 13px; line-height: 1; }
+  .bf .bd:hover { color: var(--cyan); text-shadow: 0 0 8px rgba(65,216,247,.6); }
   .bench-empty { padding: 20px 4px; font: 11px var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
   .console .benchbtn { align-self: center; margin-right: 10px; }
+  /* preview pane */
+  .preview {
+    position: sticky; top: 20px; min-width: 0; display: flex; flex-direction: column;
+    max-height: calc(100vh - 40px); min-height: 60vh;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: linear-gradient(180deg, var(--panel2), var(--panel));
+  }
+  .preview::before, .preview::after { content: ""; position: absolute; width: 12px; height: 12px; border: 1px solid var(--cyan); opacity: .8; }
+  .preview::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .preview::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+  .pv-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); font: 12px var(--mono); min-height: 42px; }
+  .pv-head .pn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+  .pv-head .pm { color: var(--muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .pv-head .pv-x { padding: 3px 8px; font-size: 11px; }
+  .pv-dl { color: var(--cyan); text-decoration: none; font: 600 10px var(--mono); letter-spacing: .15em; text-transform: uppercase; white-space: nowrap; }
+  .pv-dl:hover { text-decoration: underline; }
+  .pv-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; }
+  .pv-text { margin: 0; font: 12px/1.55 var(--mono); color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+  .pv-img {
+    display: block; max-width: 100%; height: auto; margin: 0 auto;
+    background: repeating-conic-gradient(var(--panel2) 0 25%, var(--inset) 0 50%) 0 0 / 20px 20px;
+  }
+  .pv-body .md { font-size: 14px; }
+  .pv-body .md h1 { font-size: 18px; } .pv-body .md h2 { font-size: 15px; }
+  .pv-empty { display: grid; place-content: center; gap: 8px; height: 100%; min-height: 40vh; text-align: center; font: 600 10px/1.9 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+  @media (max-width: 900px) {
+    body.bench-mode .bench { grid-template-columns: 1fr; }
+    .preview { position: relative; top: auto; max-height: none; min-height: 40vh; }
+  }
   @media (max-width: 760px) { .bf .bw { display: none; } }
 
   /* lightbox */
@@ -1174,7 +1220,7 @@ PAGE = r"""<!doctype html>
       <div class="ro done"><span class="l">COMPLETE</span><span class="v" id="ro-done">–</span></div>
     </div>
     <div class="clockbox"><span class="t" id="clock-t">--:--:--</span><span class="d" id="clock-d"></span></div>
-    <button class="benchbtn" id="bench-btn">⬡ Bench</button>
+    <a class="btnlink benchbtn" id="bench-btn" href="/bench">⬡ Bench</a>
     <button class="primary" id="new-btn">+ New Task</button>
   </header>
 
@@ -1218,6 +1264,22 @@ PAGE = r"""<!doctype html>
     <div class="panel-head">Mission Log · Completed<span class="rule"></span><button id="review-all" style="display:none">✓ All filmed</button><span class="n" id="log-n"></span></div>
     <div class="rows" id="log-rows"></div>
   </section>
+
+  <section class="bench" id="bench">
+    <div class="bench-side">
+      <div class="bench-head">
+        <span class="bt">⬡ Bench</span>
+        <span class="bp" id="bench-path"></span>
+      </div>
+      <div class="dropzone" id="bench-drop">drop files anywhere<br>paste · or click to pick<br><span style="opacity:.6">any type · 500 mb cap · lands in <span id="bench-target">~/bench</span></span></div>
+      <div class="bench-prog" id="bench-prog"></div>
+      <div class="bench-list" id="bench-list"></div>
+    </div>
+    <div class="preview" id="preview">
+      <div class="pv-head" id="pv-head"></div>
+      <div class="pv-body" id="pv-body"></div>
+    </div>
+  </section>
 </div>
 
 <div class="toasts" id="toasts"></div>
@@ -1233,18 +1295,6 @@ PAGE = r"""<!doctype html>
   <button class="lb-x" data-lb="x">✕</button>
   <div class="lb-count" id="lb-count"></div>
 </div>
-<div class="backdrop" id="bench-bd">
-  <div class="modal bench" id="bench">
-    <div class="bench-head">
-      <span class="bt">⬡ Bench</span>
-      <span class="bp" id="bench-path"></span>
-      <button class="bx" id="bench-x">✕</button>
-    </div>
-    <div class="dropzone" id="bench-drop">drop files here<br>paste · or click to pick<br><span style="opacity:.6">any type · 500 mb cap · lands in <span id="bench-target">~/bench</span></span></div>
-    <div class="bench-prog" id="bench-prog"></div>
-    <div class="bench-list" id="bench-list"></div>
-  </div>
-</div>
 <input type="file" id="imgfile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
 <input type="file" id="benchfile" multiple hidden>
 
@@ -1258,6 +1308,13 @@ const $ = s => document.querySelector(s);
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const STATUS_LABEL = { todo: 'Queued', doing: 'Active', done: 'Done' };
 const CATS = __CATEGORIES__; // {slug: {label, color}} from config.json, injected by the server
+/* /bench serves this same page; bench mode hides the board and shows the file list + preview */
+const BENCH_MODE = location.pathname === '/bench';
+if (BENCH_MODE) {
+  document.body.classList.add('bench-mode');
+  document.title = 'BENCH · TASKCTRL';
+  $('#bench-btn').textContent = '⬢ Board'; $('#bench-btn').href = '/';
+}
 const CAT_LABEL = Object.fromEntries(Object.entries(CATS).map(([k, v]) => [k, v.label || k]));
 const TYPE_LABEL = { feature: 'FEAT', bug: 'BUG', chore: 'CHORE' };
 const TYPE_FULL = { feature: 'Feature', bug: 'Bug', chore: 'Chore' };
@@ -1866,14 +1923,14 @@ document.addEventListener('keydown', ev => {
     $('[data-stsave]')?.click();
     return;
   }
-  if (ev.key === 'Escape' && benchOpen()) { closeBench(); return; }
+  if (ev.key === 'Escape' && BENCH_MODE && benchFile) { previewFile(''); benchSyncUrl(true); return; }
   if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
 });
 
 /* image intake: paste, drag-drop, file picker (view mode of an existing task only) */
 document.addEventListener('paste', ev => {
-  if (benchOpen()) {
+  if (BENCH_MODE) {
     const files = [...(ev.clipboardData?.files || [])];
     if (files.length) { ev.preventDefault(); uploadBench(files); }
     return;
@@ -1901,17 +1958,32 @@ $('#imgfile').onchange = async ev => { await uploadImages([...ev.target.files]);
 
 $('#new-btn').onclick = () => { modalId = ''; editMode = false; renderModal(); };
 
-/* ---------- bench drawer ---------- */
-const benchBd = $('#bench-bd'), benchDrop = $('#bench-drop');
-const benchOpen = () => benchBd.classList.contains('show');
+/* ---------- bench page ---------- */
+const benchDrop = $('#bench-drop');
 const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
   : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
 
 /* the open folder, relative to ~/bench ("" = root); remembered across reloads */
 let benchCwd = '';
 try { benchCwd = localStorage.getItem('taskctrl.benchCwd') || ''; } catch {}
+let benchFile = '';   // file open in the preview pane ('' = none)
+let benchFiles = [];  // listing of the open folder, as the server returned it
 const benchJoin = (rel, name) => rel ? rel + '/' + name : name;
 const benchLabel = rel => '~/bench' + (rel ? '/' + rel : '');
+const benchUrl = (name, inline) =>
+  '/bench/' + benchJoin(benchCwd, name).split('/').map(encodeURIComponent).join('/') + (inline ? '?inline=1' : '');
+const fmtWhen = m => m.replace('T', ' ').slice(0, 16);
+
+/* folder + open file live in the URL (?p=folder&f=file) so back/forward and bookmarks work */
+const benchParams = () => { const u = new URLSearchParams(location.search); return { p: u.get('p') || '', f: u.get('f') || '' }; };
+function benchSyncUrl(push) {
+  if (!BENCH_MODE) return;
+  const u = new URLSearchParams();
+  if (benchCwd) u.set('p', benchCwd);
+  if (benchFile) u.set('f', benchFile);
+  const url = '/bench' + (u.toString() ? '?' + u : '');
+  if (url !== location.pathname + location.search) history[push ? 'pushState' : 'replaceState'](null, '', url);
+}
 
 function renderBenchCrumb(rel) {
   const parts = rel ? rel.split('/') : [];
@@ -1932,20 +2004,67 @@ async function loadBench(rel = benchCwd) {
     if (rel) { benchCwd = ''; return loadBench(''); } // remembered folder is gone → back to root
     throw e;
   }
-  benchCwd = d.path;
+  benchCwd = d.path; benchFiles = d.files;
   try { localStorage.setItem('taskctrl.benchCwd', benchCwd); } catch {}
   renderBenchCrumb(benchCwd);
   const list = $('#bench-list');
-  const up = benchCwd ? `<div class="bf dir" data-rel="${esc(benchCwd.split('/').slice(0, -1).join('/'))}"><span class="bn dir">../</span><span class="bs"></span><span class="bw"></span></div>` : '';
+  const up = benchCwd ? `<div class="bf dir" data-rel="${esc(benchCwd.split('/').slice(0, -1).join('/'))}"><span class="bn dir">../</span><span class="bs"></span><span class="bw"></span><span></span></div>` : '';
   if (!d.files.length) { list.innerHTML = up + '<div class="bench-empty">folder is empty</div>'; return; }
   list.innerHTML = up + d.files.map(f => f.dir
-    ? `<div class="bf dir" data-rel="${esc(benchJoin(benchCwd, f.name))}" title="open · or drop files onto it"><span class="bn dir">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(f.mtime.replace('T', ' ').slice(0, 16))}</span></div>`
-    : `<a class="bf" href="/bench/${benchJoin(benchCwd, f.name).split('/').map(encodeURIComponent).join('/')}" download="${esc(f.name)}" title="download">` +
+    ? `<div class="bf dir" data-rel="${esc(benchJoin(benchCwd, f.name))}" title="open · or drop files onto it"><span class="bn dir">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(fmtWhen(f.mtime))}</span><span></span></div>`
+    : `<div class="bf file${f.name === benchFile ? ' sel' : ''}" data-name="${esc(f.name)}" title="preview">` +
       `<span class="bn">${esc(f.name)}</span><span class="bs">${fmtSize(f.size)}</span>` +
-      `<span class="bw">${esc(f.mtime.replace('T', ' ').slice(0, 16))}</span></a>`).join('');
+      `<span class="bw">${esc(fmtWhen(f.mtime))}</span>` +
+      `<a class="bd" href="${benchUrl(f.name)}" download="${esc(f.name)}" title="download">⤓</a></div>`).join('');
 }
-function openBench() { benchBd.classList.add('show'); loadBench().catch(e => alert(e.message)); }
-function closeBench() { benchBd.classList.remove('show'); }
+
+/* what the pane can show: images inline, markdown rendered, anything text-like as text */
+const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp']);
+const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'jsonl', 'js', 'mjs', 'cjs', 'ts',
+  'py', 'sh', 'bash', 'zsh', 'html', 'htm', 'css', 'svg', 'xml', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg',
+  'env', 'sql', 'diff', 'patch', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'php', 'lock', 'gitignore']);
+const PREVIEW_MAX = 2 * 1024 * 1024;
+
+async function previewFile(name) {
+  benchFile = name || '';
+  document.querySelectorAll('.bf.file').forEach(r => r.classList.toggle('sel', r.dataset.name === benchFile));
+  const head = $('#pv-head'), body = $('#pv-body');
+  if (!benchFile) {
+    head.innerHTML = '<span class="pn" style="color:var(--muted)">preview</span>';
+    body.innerHTML = '<div class="pv-empty">select a file to preview</div>';
+    return;
+  }
+  const f = benchFiles.find(x => x.name === benchFile && !x.dir);
+  const ext = benchFile.includes('.') ? benchFile.split('.').pop().toLowerCase() : '';
+  const dl = `<a class="pv-dl" href="${benchUrl(benchFile)}" download="${esc(benchFile)}">⤓ download</a>`;
+  head.innerHTML = `<span class="pn" title="${esc(benchLabel(benchCwd) + '/' + benchFile)}">${esc(benchFile)}</span>` +
+    `<span class="pm">${f ? fmtSize(f.size) + ' · ' + esc(fmtWhen(f.mtime)) : ''}</span>${f ? dl : ''}` +
+    `<button class="pv-x" id="pv-x" title="close (esc)">✕</button>`;
+  if (!f) { body.innerHTML = '<div class="pv-empty">no such file in this folder</div>'; return; }
+  if (IMG_EXT.has(ext)) { body.innerHTML = `<img class="pv-img" src="${benchUrl(benchFile, true)}" alt="${esc(benchFile)}">`; return; }
+  if (!TEXT_EXT.has(ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
+  if (f.size > PREVIEW_MAX) { body.innerHTML = `<div class="pv-empty">${fmtSize(f.size)} is over the 2 MB preview cap<span>${dl}</span></div>`; return; }
+  body.innerHTML = '<div class="pv-empty">loading…</div>';
+  const want = benchFile;
+  let text;
+  try {
+    const r = await fetch(benchUrl(benchFile, true), { headers: { 'X-Board-Client': '1' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    text = await r.text();
+  } catch (e) { if (benchFile === want) body.innerHTML = `<div class="pv-empty">${esc(e.message)}</div>`; return; }
+  if (benchFile !== want) return; // user clicked another file while this one loaded
+  body.innerHTML = (ext === 'md' || ext === 'markdown')
+    ? `<div class="md">${md(text)}</div>`
+    : `<pre class="pv-text">${esc(text)}</pre>`;
+  body.scrollTop = 0;
+}
+
+/* open a folder (and optionally a file in it), then reflect it in the URL */
+async function benchGo(rel, file = '', push = true) {
+  await loadBench(rel);
+  await previewFile(file);
+  benchSyncUrl(push);
+}
 
 /* XHR rather than fetch so the progress bar is real — bench files run to hundreds of MB */
 function uploadBenchOne(f, rel) {
@@ -1982,7 +2101,7 @@ function uploadBenchOne(f, rel) {
     xhr.send(f);
   });
 }
-/* rel = folder to land in; defaults to the one open in the drawer */
+/* rel = folder to land in; defaults to the open one */
 async function uploadBench(files, rel = benchCwd) {
   files = [...files];
   if (!files.length) return;
@@ -1993,41 +2112,51 @@ async function uploadBench(files, rel = benchCwd) {
   await loadBench();
 }
 
-$('#bench-btn').onclick = openBench;
-$('#bench-x').onclick = closeBench;
-benchBd.addEventListener('click', ev => { if (ev.target === benchBd) closeBench(); });
-benchDrop.onclick = () => $('#benchfile').click();
-$('#benchfile').onchange = async ev => { await uploadBench(ev.target.files); ev.target.value = ''; };
-// one drop handler on the drawer only — a drop on the zone bubbles up here, so a
-// second listener on the zone itself would upload every file twice
-benchDrop.addEventListener('dragover', () => benchDrop.classList.add('dragover'));
-benchDrop.addEventListener('dragleave', () => benchDrop.classList.remove('dragover'));
-$('#bench').addEventListener('dragover', ev => ev.preventDefault());
-$('#bench').addEventListener('drop', ev => {
-  ev.preventDefault(); benchDrop.classList.remove('dragover');
-  // dropped onto a folder row → straight into that folder; anywhere else → the open folder
-  const dirRow = ev.target.closest('.bf.dir');
-  if (dirRow) dirRow.classList.remove('dragover');
-  uploadBench(ev.dataTransfer.files, dirRow ? dirRow.dataset.rel : benchCwd);
-});
-// folder rows: click to open, highlight while a file is dragged over them
-$('#bench-list').addEventListener('click', ev => {
-  const dirRow = ev.target.closest('.bf.dir');
-  if (dirRow) loadBench(dirRow.dataset.rel).catch(e => alert(e.message));
-});
-$('#bench-list').addEventListener('dragover', ev => {
-  const dirRow = ev.target.closest('.bf.dir');
-  document.querySelectorAll('.bf.dir.dragover').forEach(r => { if (r !== dirRow) r.classList.remove('dragover'); });
-  if (dirRow) dirRow.classList.add('dragover');
-});
-$('#bench-list').addEventListener('dragleave', ev => {
-  const dirRow = ev.target.closest('.bf.dir');
-  if (dirRow && !dirRow.contains(ev.relatedTarget)) dirRow.classList.remove('dragover');
-});
-$('#bench-path').addEventListener('click', ev => {
-  const b = ev.target.closest('button[data-rel]');
-  if (b) loadBench(b.dataset.rel).catch(e => alert(e.message));
-});
+if (BENCH_MODE) {
+  benchDrop.onclick = () => $('#benchfile').click();
+  $('#benchfile').onchange = async ev => { await uploadBench(ev.target.files); ev.target.value = ''; };
+  // one drop handler for the whole page — a drop on the zone bubbles up here, so a
+  // second listener on the zone itself would upload every file twice
+  benchDrop.addEventListener('dragover', () => benchDrop.classList.add('dragover'));
+  benchDrop.addEventListener('dragleave', () => benchDrop.classList.remove('dragover'));
+  document.addEventListener('dragover', ev => ev.preventDefault());
+  document.addEventListener('drop', ev => {
+    ev.preventDefault(); benchDrop.classList.remove('dragover');
+    // dropped onto a folder row → straight into that folder; anywhere else → the open folder
+    const dirRow = ev.target.closest('.bf.dir');
+    if (dirRow) dirRow.classList.remove('dragover');
+    uploadBench(ev.dataTransfer.files, dirRow ? dirRow.dataset.rel : benchCwd);
+  });
+  // rows: folders open on click, files open in the preview; the ⤓ link downloads as before
+  $('#bench-list').addEventListener('click', ev => {
+    if (ev.target.closest('.bd')) return;
+    const dirRow = ev.target.closest('.bf.dir');
+    if (dirRow) { benchGo(dirRow.dataset.rel).catch(e => alert(e.message)); return; }
+    const fileRow = ev.target.closest('.bf.file');
+    if (fileRow) { previewFile(fileRow.dataset.name); benchSyncUrl(true); }
+  });
+  $('#bench-list').addEventListener('dragover', ev => {
+    const dirRow = ev.target.closest('.bf.dir');
+    document.querySelectorAll('.bf.dir.dragover').forEach(r => { if (r !== dirRow) r.classList.remove('dragover'); });
+    if (dirRow) dirRow.classList.add('dragover');
+  });
+  $('#bench-list').addEventListener('dragleave', ev => {
+    const dirRow = ev.target.closest('.bf.dir');
+    if (dirRow && !dirRow.contains(ev.relatedTarget)) dirRow.classList.remove('dragover');
+  });
+  $('#bench-path').addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-rel]');
+    if (b) benchGo(b.dataset.rel).catch(e => alert(e.message));
+  });
+  $('#pv-head').addEventListener('click', ev => {
+    if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
+  });
+  window.addEventListener('popstate', () => { const { p, f } = benchParams(); benchGo(p, f, false).catch(() => {}); });
+  // a bare /bench opens the folder remembered from last time; ?p= in the URL wins
+  const { p, f } = benchParams();
+  benchGo(location.search ? p : benchCwd, f, false).catch(e => alert(e.message));
+}
+
 $('#review-all').onclick = async ev => {
   ev.stopPropagation(); // panel-head clicks shouldn't fall through to row handling
   await api('POST', '/api/tasks/mark-reviewed');
@@ -2056,8 +2185,7 @@ function tick() {
 }
 setInterval(tick, 1000); tick();
 
-refresh();
-setInterval(refresh, 15000); // pick up direct edits to tasks.json
+if (!BENCH_MODE) { refresh(); setInterval(refresh, 15000); } // pick up direct edits to tasks.json
 
 /* ---------- toasts: live feed of changes made through the API ---------- */
 let evSeq = null; // last event seq seen; null until the first poll primes it
@@ -2068,7 +2196,7 @@ async function pollEvents() {
   } catch (e) { return; } // server briefly down — next poll retries
   if (evSeq === null) { evSeq = r.seq; return; } // prime only, no toasts for history
   evSeq = r.seq;
-  if (r.events.length) refresh(); // something changed — show it now, not in 15s
+  if (r.events.length && !BENCH_MODE) refresh(); // something changed — show it now, not in 15s
   r.events.filter(e => e.actor !== 'board').forEach(showToast);
 }
 function showToast(e) {
@@ -2085,7 +2213,7 @@ function showToast(e) {
   const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
   el.onclick = () => {
     dismiss();
-    if (e.action === 'bench') { openBench(); return; }
+    if (e.action === 'bench') { if (BENCH_MODE) loadBench().catch(() => {}); else location.href = '/bench'; return; }
     if (e.action !== 'deleted' && tasks.find(t => t.id === e.task_id)) {
       modalId = e.task_id; editMode = false; stEdit = null; renderModal();
     }

@@ -62,16 +62,19 @@ write call-ready notes when it ships.
   mouse-tracking tilt, staggered fly-in, holo sweep, breathing active glow, and a
   chromatic glitch on click. Flat filter rows below 1280px. Exclusive filters for
   project / type / priority / view (Today, Archived), persisted in localStorage.
-- **Bench drawer** — a `⬡ Bench` button in the header opens a drop zone for a plain
-  scratch folder (`~/bench` by default, `TASKCTRL_BENCH` to override). Drop, paste, or
-  pick files of any type from any machine on the LAN and they land there under their
-  original name (a clash gets a `-2`, `-3` suffix, never an overwrite). Subfolders
-  are browsable — click a folder row to open it (breadcrumb / `../` to go back), and
-  whatever's open is where drops, pastes and picks land; or drag a file straight onto
-  a folder row to drop it in there without opening it. The open folder is remembered
-  across reloads. Real upload progress per file, a toast on arrival, and a newest-first
-  listing with download links. 500 MB cap. Folders can't be created from the browser
-  and delete is deliberately absent — those are shell jobs.
+- **Bench page** — the `⬡ Bench` header button opens `/bench`, a full page for a plain
+  scratch folder (`~/bench` by default, `TASKCTRL_BENCH` to override). Left: the file
+  list and a drop zone. Right: a preview pane — images render inline, `.md` files
+  render as markdown (the board's own renderer, same as task notes), and anything
+  text-like (`.txt`, `.log`, `.csv`, `.json`, `.js`, `.py`, `.html` source, …) shows as
+  text; other types offer a download. Text previews stop at 2 MB. Drop, paste, or pick
+  files of any type from any machine on the LAN and they land in the open folder under
+  their original name (a clash gets a `-2`, `-3` suffix, never an overwrite), or drag
+  a file straight onto a folder row. Folder and open file live in the URL
+  (`/bench?p=sub/folder&f=name`) so back/forward and bookmarks work; a bare `/bench`
+  reopens the last folder. Real upload progress per file, a toast on arrival, and a
+  newest-first listing with a `⤓` download link per row. Folders can't be created from
+  the browser and delete is deliberately absent — those are shell jobs.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ![Task view](docs/task.png)
@@ -109,7 +112,7 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then newest files) |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
-| `GET /bench/<path/to/file>`          | download a bench file                                 |
+| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`) |
 
 ```bash
 curl -X POST localhost:8100/api/tasks \
