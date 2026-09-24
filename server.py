@@ -95,14 +95,17 @@ BENCH_DIR = os.environ.get("TASKCTRL_BENCH") or os.path.expanduser("~/bench")
 HOME_DIR = os.path.expanduser("~")   # the outer root: paths starting with "~" browse the home dir
 MAX_BENCH_BYTES = 500 * 1024 * 1024
 MAX_EDIT_BYTES = 2 * 1024 * 1024     # in-place edits from the bench page (matches the preview cap)
-BENCH_HIDE = {"node_modules", "lighthouse", ".git", "__pycache__"}
+# dotfiles (.env, .gitignore, .config/…) are listed and editable; only pure noise and
+# the ssh keys stay out of reach by name
+BENCH_HIDE = {"node_modules", "lighthouse", ".git", "__pycache__", ".ssh"}
+BENCH_TMP = re.compile(r"^\..*\.tmp-\d+$")   # the save route's swap files
 
 
 def bench_safe_name(raw):
-    """Strip any path and control chars; refuse dotfiles and empty names."""
+    """Strip any path and control chars; refuse empty names, "." / ".." and hidden names."""
     name = os.path.basename((raw or "").replace("\\", "/")).strip()
     name = re.sub(r"[\x00-\x1f/]", "", name)
-    if not name or name.startswith("."):
+    if not name or name in (".", "..") or name in BENCH_HIDE or BENCH_TMP.match(name):
         return None
     return name[:200]
 
@@ -112,7 +115,7 @@ def _under(full, root):
 
 
 def _hidden_seg(seg):
-    return seg == ".." or seg.startswith(".") or seg in BENCH_HIDE
+    return seg == ".." or seg in BENCH_HIDE
 
 
 def bench_abs(rel):
@@ -129,8 +132,8 @@ def bench_safe_rel(raw):
     that lands inside ~/bench comes back in the bench form, so one folder has one URL.
 
     Returns None for anything that could escape or reach a hidden dir: absolute
-    paths, "..", dotfile segments, hidden names, control chars, symlinks that resolve
-    outside home, or a folder that doesn't exist. Folders are never created from
+    paths, "..", hidden names (.git, .ssh, node_modules…), control chars, symlinks
+    that resolve outside home, or a folder that doesn't exist. Dotfolders are fine. Folders are never created from
     here — only ones the user (or an agent) already made on the VM can be written
     into."""
     raw = (raw or "").replace("\\", "/").strip().strip("/")
@@ -207,7 +210,7 @@ def bench_listing(rel=""):
         return out
     with entries:
         for e in entries:
-            if e.name in BENCH_HIDE or e.name.startswith("."):
+            if e.name in BENCH_HIDE or BENCH_TMP.match(e.name):
                 continue
             try:
                 st = e.stat()
@@ -496,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": "file too large (500 MB cap)"})
         name = bench_safe_name(unquote(self.headers.get("X-Filename") or ""))
         if not name:
-            return self._json(400, {"error": "X-Filename header required (no dotfiles)"})
+            return self._json(400, {"error": "X-Filename header required"})
         os.makedirs(BENCH_DIR, exist_ok=True)
         # X-Bench-Dir (URL-encoded, optional) picks an EXISTING subfolder of ~/bench
         rel = bench_safe_rel(unquote(self.headers.get("X-Bench-Dir") or ""))
@@ -524,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         """/bench/<path> → (rel, name, abs path) for an existing regular file, else None."""
         folder, _, leaf = unquote(raw).rpartition("/")
         rel, name = bench_safe_rel(folder), bench_safe_name(leaf)
-        if rel is None or not name or name in BENCH_HIDE:
+        if rel is None or not name:
             return None
         path = os.path.join(bench_abs(rel), name)
         if os.path.islink(path) or not os.path.isfile(path):
@@ -1181,6 +1184,9 @@ PAGE = r"""<!doctype html>
   .bench-side { min-width: 0; }
   .bench-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
   .bench-head .bback { padding: 4px 10px; font-size: 10px; }
+  .bench-head .bhid { text-transform: none; letter-spacing: .08em; opacity: .55; }
+  .bench-head .bhid.on { opacity: 1; color: var(--cyan); border-color: var(--cyan); }
+  .bf .bn.hid { color: var(--dim); }
   .bench-head .bt { font: 700 13px var(--mono); letter-spacing: .22em; color: var(--cyan); text-transform: uppercase; }
   .bench-head .bp { font: 11px var(--mono); color: var(--muted); letter-spacing: .06em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bench-head .bp button { all: unset; cursor: pointer; color: var(--dim); }
@@ -1394,6 +1400,7 @@ PAGE = r"""<!doctype html>
         <button class="bback" id="bench-back" title="back">‹ Back</button>
         <span class="bt">⬡ Bench</span>
         <span class="bp" id="bench-path"></span>
+        <button class="bback bhid" id="bench-hid" title="show / hide dotfiles">.hidden</button>
       </div>
       <div class="dropzone" id="bench-drop">drop files anywhere<br>paste · or click to pick<br><span style="opacity:.6">any type · 500 mb cap · lands in <span id="bench-target">~/bench</span></span></div>
       <div class="bench-prog" id="bench-prog"></div>
@@ -2093,6 +2100,9 @@ const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) +
 let benchCwd = '';
 try { benchCwd = localStorage.getItem('taskctrl.benchCwd') || ''; } catch {}
 let benchFile = '';   // file open in the preview pane ('' = none)
+/* dotfiles (.env, .gitignore…) are listed by the server; the toggle only hides them in this browser */
+let benchHidden = true;
+try { benchHidden = localStorage.getItem('taskctrl.benchHidden') !== '0'; } catch {}
 let benchFiles = [];  // listing of the open folder, as the server returned it
 const benchJoin = (rel, name) => rel ? rel + '/' + name : name;
 const benchHome = rel => rel === '~' || rel.startsWith('~/');   // a path in the home tree rather than under ~/bench
@@ -2142,11 +2152,16 @@ async function loadBench(rel = benchCwd) {
   const list = $('#bench-list');
   // the server names the folder above (from the bench root that's the home tree; none at ~)
   const up = d.parent !== null ? `<div class="bf dir" data-rel="${esc(d.parent)}"><span class="bn dir">../</span><span class="bs"></span><span class="bw"></span><span></span></div>` : '';
-  if (!d.files.length) { list.innerHTML = up + '<div class="bench-empty">folder is empty</div>'; return; }
-  list.innerHTML = up + d.files.map(f => f.dir
-    ? `<div class="bf dir" data-rel="${esc(benchJoin(benchCwd, f.name))}" title="open · or drop files onto it"><span class="bn dir">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(fmtWhen(f.mtime))}</span><span></span></div>`
+  const hidden = d.files.filter(f => f.name.startsWith('.')).length;
+  const btn = $('#bench-hid');
+  btn.classList.toggle('on', benchHidden);
+  btn.textContent = '.hidden' + (hidden ? ' ' + hidden : '');
+  const files = benchHidden ? d.files : d.files.filter(f => !f.name.startsWith('.'));
+  if (!files.length) { list.innerHTML = up + `<div class="bench-empty">${d.files.length ? hidden + ' hidden' : 'folder is empty'}</div>`; return; }
+  list.innerHTML = up + files.map(f => f.dir
+    ? `<div class="bf dir" data-rel="${esc(benchJoin(benchCwd, f.name))}" title="open · or drop files onto it"><span class="bn dir${f.name.startsWith('.') ? ' hid' : ''}">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(fmtWhen(f.mtime))}</span><span></span></div>`
     : `<div class="bf file${f.name === benchFile ? ' sel' : ''}" data-name="${esc(f.name)}" title="preview">` +
-      `<span class="bn">${esc(f.name)}</span><span class="bs">${fmtSize(f.size)}</span>` +
+      `<span class="bn${f.name.startsWith('.') ? ' hid' : ''}">${esc(f.name)}</span><span class="bs">${fmtSize(f.size)}</span>` +
       `<span class="bw">${esc(fmtWhen(f.mtime))}</span>` +
       `<a class="bd" href="${benchUrl(f.name)}" download="${esc(f.name)}" title="download">⤓</a></div>`).join('');
 }
@@ -2355,6 +2370,11 @@ if (BENCH_MODE) {
     if (b && benchLeaveOk()) benchGo(b.dataset.rel).catch(e => alert(e.message));
   });
   // ‹ Back walks the folders/files opened on this page, then leaves for the board
+  $('#bench-hid').onclick = () => {
+    benchHidden = !benchHidden;
+    try { localStorage.setItem('taskctrl.benchHidden', benchHidden ? '1' : '0'); } catch {}
+    loadBench().catch(() => {});
+  };
   $('#bench-back').onclick = () => { if (!benchLeaveOk()) return; if (history.state?.depth > 0) history.back(); else location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }

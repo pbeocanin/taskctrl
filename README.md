@@ -75,7 +75,11 @@ write call-ready notes when it ships.
   editing — and leaving the editor with unsaved changes asks first. The page isn't
   locked to `~/bench`: `../` from the bench root climbs into the home directory, and a
   folder path starting with `~` (`/bench?p=~/tasks/docs`) browses anywhere under home
-  with the same rules — dotfiles, `node_modules`, `.git` stay hidden and unreachable.
+  with the same rules. Dotfiles (`.env`, `.gitignore`, `.config/…`) are listed,
+  previewable and editable like anything else — a `.hidden` toggle in the header (on by
+  default, remembered per browser) tucks them away when a folder gets noisy. Only
+  `.git`, `node_modules`, `__pycache__`, `lighthouse` and `~/.ssh` stay hidden and
+  unreachable.
   Drop, paste, or pick
   files of any type from any machine on the LAN and they land in the open folder under
   their original name (a clash gets a `-2`, `-3` suffix, never an overwrite), or drag
