@@ -67,7 +67,16 @@ write call-ready notes when it ships.
   list and a drop zone. Right: a preview pane — images render inline, `.md` files
   render as markdown (the board's own renderer, same as task notes), and anything
   text-like (`.txt`, `.log`, `.csv`, `.json`, `.js`, `.py`, `.html` source, …) shows as
-  text; other types offer a download. Text previews stop at 2 MB. Drop, paste, or pick
+  text; other types offer a download. Text previews stop at 2 MB. Any text preview has
+  an `✎ edit` button: the pane becomes an editor, `Ctrl+S` or `save` writes the file
+  back in place (only existing files, same 2 MB cap, written to a temp file and swapped
+  in). A save is conditional on the file not having changed on disk since it was
+  opened — if an agent rewrote it meanwhile you get a choice to overwrite or keep
+  editing — and leaving the editor with unsaved changes asks first. The page isn't
+  locked to `~/bench`: `../` from the bench root climbs into the home directory, and a
+  folder path starting with `~` (`/bench?p=~/tasks/docs`) browses anywhere under home
+  with the same rules — dotfiles, `node_modules`, `.git` stay hidden and unreachable.
+  Drop, paste, or pick
   files of any type from any machine on the LAN and they land in the open folder under
   their original name (a clash gets a `-2`, `-3` suffix, never an overwrite), or drag
   a file straight onto a folder row. Folder and open file live in the URL
@@ -110,9 +119,10 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
 | `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
-| `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then newest files) |
+| `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then newest files) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
-| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`) |
+| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `/bench/~/a/b/file` reaches the home tree |
+| `PUT /bench/<path/to/file>`          | overwrite an existing file with the raw body (2 MB cap, atomic); `X-Bench-Stamp: <stamp from the listing>` makes it conditional → 409 if the file changed since |
 
 ```bash
 curl -X POST localhost:8100/api/tasks \

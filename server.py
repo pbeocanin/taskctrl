@@ -92,7 +92,9 @@ def sniff_image_ext(data):
 
 # ---- bench: a plain drop folder (~/bench) reachable from the board -----------
 BENCH_DIR = os.environ.get("TASKCTRL_BENCH") or os.path.expanduser("~/bench")
+HOME_DIR = os.path.expanduser("~")   # the outer root: paths starting with "~" browse the home dir
 MAX_BENCH_BYTES = 500 * 1024 * 1024
+MAX_EDIT_BYTES = 2 * 1024 * 1024     # in-place edits from the bench page (matches the preview cap)
 BENCH_HIDE = {"node_modules", "lighthouse", ".git", "__pycache__"}
 
 
@@ -105,30 +107,77 @@ def bench_safe_name(raw):
     return name[:200]
 
 
+def _under(full, root):
+    return full == root or full.startswith(root + os.sep)
+
+
+def _hidden_seg(seg):
+    return seg == ".." or seg.startswith(".") or seg in BENCH_HIDE
+
+
+def bench_abs(rel):
+    """Canonical rel → absolute folder path. "" / "a/b" are under ~/bench; "~" / "~/a/b"
+    are under the home dir."""
+    if rel == "~" or rel.startswith("~/"):
+        return os.path.join(HOME_DIR, rel[2:]) if rel != "~" else HOME_DIR
+    return os.path.join(BENCH_DIR, rel) if rel else BENCH_DIR
+
+
 def bench_safe_rel(raw):
-    """Normalise a folder path relative to ~/bench ("" = the root, "a/b" = a subfolder).
+    """Normalise a folder path to its canonical rel form: "" = ~/bench, "a/b" = a
+    subfolder of it, "~" = the home dir, "~/a/b" = a folder under home. A home path
+    that lands inside ~/bench comes back in the bench form, so one folder has one URL.
 
     Returns None for anything that could escape or reach a hidden dir: absolute
-    paths, "..", dotfile segments, hidden names, control chars, or a folder that
-    doesn't exist. Folders are never created from here — only ones the user (or an
-    agent) already made on the VM can be written into."""
+    paths, "..", dotfile segments, hidden names, control chars, symlinks that resolve
+    outside home, or a folder that doesn't exist. Folders are never created from
+    here — only ones the user (or an agent) already made on the VM can be written
+    into."""
     raw = (raw or "").replace("\\", "/").strip().strip("/")
-    if not raw:
-        return ""
     parts = []
     for seg in raw.split("/"):
         seg = re.sub(r"[\x00-\x1f]", "", seg).strip()
         if not seg or seg == ".":
             continue
-        if seg == ".." or seg.startswith(".") or seg in BENCH_HIDE:
+        if _hidden_seg(seg):
             return None
         parts.append(seg)
-    rel = "/".join(parts)
-    full = os.path.realpath(os.path.join(BENCH_DIR, rel))
-    root = os.path.realpath(BENCH_DIR)
-    if not (full == root or full.startswith(root + os.sep)) or not os.path.isdir(full):
+    home = bool(parts) and parts[0] == "~"
+    base = HOME_DIR if home else BENCH_DIR
+    full = os.path.realpath(os.path.join(base, *(parts[1:] if home else parts)))
+    if not os.path.isdir(full):
+        return None
+    bench_root, home_root = os.path.realpath(BENCH_DIR), os.path.realpath(HOME_DIR)
+    if _under(full, bench_root):
+        rel = os.path.relpath(full, bench_root)
+        rel = "" if rel == "." else rel
+    elif _under(full, home_root):
+        rel = os.path.relpath(full, home_root)
+        rel = "~" if rel == "." else "~/" + rel
+    else:
+        return None
+    # re-check the resolved path: a symlink must not be a way into .ssh or node_modules
+    if any(_hidden_seg(seg) for seg in rel.split("/") if seg != "~"):
         return None
     return rel
+
+
+def bench_parent(rel):
+    """The folder above `rel` in canonical form, or None at the top (~)."""
+    if rel == "~":
+        return None
+    if rel.startswith("~/"):
+        up = rel.rsplit("/", 1)[0]
+        return up if up else "~"
+    if rel:
+        return rel.rsplit("/", 1)[0] if "/" in rel else ""
+    # the bench root: climb into the home tree if ~/bench lives there
+    home_root = os.path.realpath(HOME_DIR)
+    up = os.path.dirname(os.path.realpath(BENCH_DIR))
+    if not _under(up, home_root):
+        return None
+    r = os.path.relpath(up, home_root)
+    return "~" if r == "." else "~/" + r
 
 
 def bench_unique(name, rel=""):
@@ -138,16 +187,22 @@ def bench_unique(name, rel=""):
     if not dot or not base:
         base, ext = name, ""
     cand, n = name, 1
-    while os.path.exists(os.path.join(BENCH_DIR, rel, cand)):
+    while os.path.exists(os.path.join(bench_abs(rel), cand)):
         n += 1
         cand = f"{base}-{n}.{ext}" if ext else f"{base}-{n}"
     return cand
 
 
+def bench_stamp(st):
+    """Change token for conditional saves: mtime in ns + size, so two writes inside the
+    same second still read as different versions."""
+    return f"{st.st_mtime_ns}-{st.st_size}"
+
+
 def bench_listing(rel=""):
     out = []
     try:
-        entries = os.scandir(os.path.join(BENCH_DIR, rel))
+        entries = os.scandir(bench_abs(rel))
     except OSError:
         return out
     with entries:
@@ -159,7 +214,8 @@ def bench_listing(rel=""):
             except OSError:
                 continue
             out.append({"name": e.name, "dir": e.is_dir(), "size": st.st_size,
-                        "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))})
+                        "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
+                        "stamp": bench_stamp(st)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     out.sort(key=lambda x: not x["dir"])  # stable: folders first, newest on top within each
     return out
@@ -332,7 +388,8 @@ class Handler(BaseHTTPRequestHandler):
             rel = bench_safe_rel(unquote(m.group(1)) if m else "")
             if rel is None:
                 return self._json(404, {"error": "no such bench folder"})
-            self._json(200, {"dir": BENCH_DIR, "path": rel, "files": bench_listing(rel)})
+            self._json(200, {"dir": BENCH_DIR, "path": rel, "parent": bench_parent(rel),
+                             "files": bench_listing(rel)})
         elif self.path.startswith("/bench/"):
             return self._bench_download(self.path[len("/bench/"):])
         elif self.path.startswith("/images/"):
@@ -447,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "no such bench folder"})
         with _lock:  # the unique-name check and the create must not interleave
             name = bench_unique(name, rel)
-            fd = os.open(os.path.join(BENCH_DIR, rel, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(os.path.join(bench_abs(rel), name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         remaining, tmp_err = length, None
         with os.fdopen(fd, "wb") as f:
             while remaining:
@@ -458,21 +515,31 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(chunk)
                 remaining -= len(chunk)
         if tmp_err:
-            os.unlink(os.path.join(BENCH_DIR, rel, name))
+            os.unlink(os.path.join(bench_abs(rel), name))
             return self._json(400, {"error": tmp_err})
         self._json(201, {"name": name, "path": rel, "size": length, "dir": BENCH_DIR})
+
+    @staticmethod
+    def _bench_file(raw):
+        """/bench/<path> → (rel, name, abs path) for an existing regular file, else None."""
+        folder, _, leaf = unquote(raw).rpartition("/")
+        rel, name = bench_safe_rel(folder), bench_safe_name(leaf)
+        if rel is None or not name or name in BENCH_HIDE:
+            return None
+        path = os.path.join(bench_abs(rel), name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            return None
+        return rel, name, path
 
     def _bench_download(self, raw):
         # /bench/<file> or /bench/<sub>/<folder>/<file>, optionally ?inline=1 for
         # the bench page's preview pane
         raw, _, query = raw.partition("?")
         inline = "inline=1" in query.split("&")
-        raw = unquote(raw)
-        folder, _, leaf = raw.rpartition("/")
-        rel, name = bench_safe_rel(folder), bench_safe_name(leaf)
-        path = os.path.join(BENCH_DIR, rel, name) if rel is not None and name else None
-        if not path or name in BENCH_HIDE or not os.path.isfile(path):
+        hit = self._bench_file(raw)
+        if not hit:
             return self._json(404, {"error": "not found"})
+        rel, name, path = hit
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         if inline:
             # images keep their type; everything else is shown as plain text so an
@@ -491,7 +558,52 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             shutil.copyfileobj(f, self.wfile)
 
+    def _bench_save(self, raw):
+        # PUT /bench/<path>: the body replaces the file's contents. Only existing
+        # files, 2 MB cap. X-Bench-Stamp (the listing's `stamp`) makes the save
+        # conditional: if the file changed on disk since, 409 and nothing is written.
+        # Omit the header (or the page's "overwrite anyway") to save regardless.
+        hit = self._bench_file(raw.partition("?")[0])
+        if not hit:
+            return self._json(404, {"error": "not found"})
+        rel, name, path = hit
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_EDIT_BYTES:
+            return self._json(413, {"error": "file too large to save from here (2 MB cap)"})
+        data, remaining = [], length
+        while remaining:
+            chunk = self.rfile.read(min(remaining, 1 << 20))
+            if not chunk:
+                return self._json(400, {"error": "connection closed mid-save"})
+            data.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(data)
+        expect = self.headers.get("X-Bench-Stamp")
+        with _lock:  # the stale check and the replace must not interleave with another save
+            st = os.stat(path)
+            if expect and expect != bench_stamp(st):
+                return self._json(409, {"error": "file changed on disk since you opened it", "stamp": bench_stamp(st)})
+            # write beside the file, then swap in — a dropped connection or a crash can
+            # never leave a half-written file behind
+            tmp = os.path.join(os.path.dirname(path), f".{name}.tmp-{os.getpid()}")
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.chmod(tmp, st.st_mode & 0o7777)
+                os.replace(tmp, path)
+            except OSError as e:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return self._json(500, {"error": f"save failed: {e.strerror or e}"})
+            st = os.stat(path)
+        self._json(200, {"name": name, "path": rel, "size": st.st_size, "stamp": bench_stamp(st),
+                         "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))})
+
     def do_PUT(self):
+        if self.path.startswith("/bench/"):
+            return self._bench_save(self.path[len("/bench/"):])
         tid = self._task_id()
         if not tid:
             return self._json(404, {"error": "not found"})
@@ -1126,7 +1238,17 @@ PAGE = r"""<!doctype html>
   .pv-head .pv-x { padding: 3px 8px; font-size: 11px; }
   .pv-dl { color: var(--cyan); text-decoration: none; font: 600 10px var(--mono); letter-spacing: .15em; text-transform: uppercase; white-space: nowrap; }
   .pv-dl:hover { text-decoration: underline; }
+  .pv-head .pv-ed { padding: 3px 9px; font-size: 10px; letter-spacing: .12em; }
+  .pv-head .pv-ed.save { color: var(--cyan); border-color: var(--cyan); }
+  .pv-head .pv-ed.save:disabled { opacity: .35; cursor: default; box-shadow: none; }
+  .pv-head .pv-dirty { color: var(--amber); font-size: 14px; line-height: 1; }
   .pv-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; }
+  .pv-body.editing { padding: 0; display: flex; overflow: hidden; }
+  .pv-edit {
+    flex: 1; width: 100%; min-height: 60vh; margin: 0; padding: 14px 16px; border: 0; outline: 0; resize: none;
+    background: var(--inset); color: var(--ink); font: 12px/1.55 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
+  }
+  .pv-edit:focus { box-shadow: inset 0 0 0 1px rgba(65,216,247,.35); }
   .pv-text { margin: 0; font: 12px/1.55 var(--mono); color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
   .pv-img {
     display: block; max-width: 100%; height: auto; margin: 0 auto;
@@ -1925,6 +2047,8 @@ document.addEventListener('keydown', ev => {
     $('[data-stsave]')?.click();
     return;
   }
+  if (BENCH_MODE && benchEdit && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') { ev.preventDefault(); benchSave(); return; }
+  if (ev.key === 'Escape' && BENCH_MODE && benchEdit) { benchEditStop(); return; }
   if (ev.key === 'Escape' && BENCH_MODE && benchFile) { previewFile(''); benchSyncUrl(true); return; }
   if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
@@ -1971,7 +2095,8 @@ try { benchCwd = localStorage.getItem('taskctrl.benchCwd') || ''; } catch {}
 let benchFile = '';   // file open in the preview pane ('' = none)
 let benchFiles = [];  // listing of the open folder, as the server returned it
 const benchJoin = (rel, name) => rel ? rel + '/' + name : name;
-const benchLabel = rel => '~/bench' + (rel ? '/' + rel : '');
+const benchHome = rel => rel === '~' || rel.startsWith('~/');   // a path in the home tree rather than under ~/bench
+const benchLabel = rel => benchHome(rel) ? rel : '~/bench' + (rel ? '/' + rel : '');
 const benchUrl = (name, inline) =>
   '/bench/' + benchJoin(benchCwd, name).split('/').map(encodeURIComponent).join('/') + (inline ? '?inline=1' : '');
 const fmtWhen = m => m.replace('T', ' ').slice(0, 16);
@@ -1990,10 +2115,13 @@ function benchSyncUrl(push) {
 }
 
 function renderBenchCrumb(rel) {
-  const parts = rel ? rel.split('/') : [];
-  let html = parts.length ? '<button data-rel="">~/bench</button>' : '<span class="cur">~/bench</span>';
+  // two roots: ~/bench (rel "" / "a/b") and the home dir (rel "~" / "~/a/b")
+  const home = benchHome(rel);
+  const parts = home ? rel.split('/').slice(1) : (rel ? rel.split('/') : []);
+  const rootRel = home ? '~' : '', rootLabel = home ? '~' : '~/bench';
+  let html = parts.length ? `<button data-rel="${rootRel}">${rootLabel}</button>` : `<span class="cur">${rootLabel}</span>`;
   parts.forEach((p, i) => {
-    const sub = parts.slice(0, i + 1).join('/');
+    const sub = (home ? '~/' : '') + parts.slice(0, i + 1).join('/');
     html += '<span class="sep">/</span>' + (i === parts.length - 1
       ? `<span class="cur">${esc(p)}</span>` : `<button data-rel="${esc(sub)}">${esc(p)}</button>`);
   });
@@ -2012,7 +2140,8 @@ async function loadBench(rel = benchCwd) {
   try { localStorage.setItem('taskctrl.benchCwd', benchCwd); } catch {}
   renderBenchCrumb(benchCwd);
   const list = $('#bench-list');
-  const up = benchCwd ? `<div class="bf dir" data-rel="${esc(benchCwd.split('/').slice(0, -1).join('/'))}"><span class="bn dir">../</span><span class="bs"></span><span class="bw"></span><span></span></div>` : '';
+  // the server names the folder above (from the bench root that's the home tree; none at ~)
+  const up = d.parent !== null ? `<div class="bf dir" data-rel="${esc(d.parent)}"><span class="bn dir">../</span><span class="bs"></span><span class="bw"></span><span></span></div>` : '';
   if (!d.files.length) { list.innerHTML = up + '<div class="bench-empty">folder is empty</div>'; return; }
   list.innerHTML = up + d.files.map(f => f.dir
     ? `<div class="bf dir" data-rel="${esc(benchJoin(benchCwd, f.name))}" title="open · or drop files onto it"><span class="bn dir">${esc(f.name)}/</span><span class="bs"></span><span class="bw">${esc(fmtWhen(f.mtime))}</span><span></span></div>`
@@ -2029,7 +2158,16 @@ const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 
   'env', 'sql', 'diff', 'patch', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'php', 'lock', 'gitignore']);
 const PREVIEW_MAX = 2 * 1024 * 1024;
 
+/* in-place editing of text-like files: null when viewing, else what the editor started from */
+let benchEdit = null;   // { name, rel, stamp, text }
+const benchDirty = () => !!benchEdit && $('#pv-edit')?.value !== benchEdit.text;
+/* every way out of the editor asks first when there are unsaved changes */
+const benchLeaveOk = () => !benchDirty() || confirm('Discard unsaved changes to ' + benchEdit.name + '?');
+const pvEditBtn = () => `<button class="pv-ed" id="pv-edit-btn" title="edit in place">✎ edit</button>`;
+
 async function previewFile(name) {
+  benchEdit = null;
+  $('#pv-body').classList.remove('editing');
   benchFile = name || '';
   document.querySelectorAll('.bf.file').forEach(r => r.classList.toggle('sel', r.dataset.name === benchFile));
   const head = $('#pv-head'), body = $('#pv-body');
@@ -2061,6 +2199,69 @@ async function previewFile(name) {
     ? `<div class="md">${md(text)}</div>`
     : `<pre class="pv-text">${esc(text)}</pre>`;
   body.scrollTop = 0;
+  // text is editable: the button carries the text and the change stamp the file had when loaded
+  $('#pv-x').insertAdjacentHTML('beforebegin', pvEditBtn());
+  $('#pv-edit-btn').onclick = () => benchEditStart({ name: benchFile, rel: benchCwd, stamp: f.stamp, text });
+}
+
+function benchEditStart(src) {
+  benchEdit = src;
+  const head = $('#pv-head'), body = $('#pv-body');
+  head.innerHTML = `<span class="pn" title="${esc(benchLabel(src.rel) + '/' + src.name)}">${esc(src.name)}</span>` +
+    `<span class="pv-dirty" id="pv-dirty" title="unsaved changes" style="visibility:hidden">●</span>` +
+    `<span class="pm" id="pv-edit-meta">editing · ctrl+s saves</span>` +
+    `<button class="pv-ed save" id="pv-save" disabled>save</button>` +
+    `<button class="pv-ed" id="pv-cancel" title="back to preview (esc)">cancel</button>`;
+  body.classList.add('editing');
+  body.innerHTML = `<textarea class="pv-edit" id="pv-edit" spellcheck="false"></textarea>`;
+  const ta = $('#pv-edit');
+  ta.value = src.text;
+  ta.oninput = () => { const d = benchDirty(); $('#pv-dirty').style.visibility = d ? 'visible' : 'hidden'; $('#pv-save').disabled = !d; };
+  ta.onkeydown = ev => {
+    if (ev.key === 'Tab') { ev.preventDefault(); ta.setRangeText('\t', ta.selectionStart, ta.selectionEnd, 'end'); ta.oninput(); }
+  };
+  $('#pv-save').onclick = () => benchSave();
+  $('#pv-cancel').onclick = () => benchEditStop();
+  ta.focus();
+}
+
+/* leave the editor: back to the preview (which re-reads the file so a save shows fresh) */
+function benchEditStop(force) {
+  if (!benchEdit) return;
+  if (!force && !benchLeaveOk()) return;
+  const name = benchEdit.name;
+  benchEdit = null;
+  previewFile(name);
+}
+
+async function benchSave(force) {
+  if (!benchEdit || !benchDirty() && !force) return;
+  const { name, rel, stamp } = benchEdit;
+  const text = $('#pv-edit').value;
+  const meta = $('#pv-edit-meta');
+  meta.textContent = 'saving…';
+  const url = '/bench/' + benchJoin(rel, name).split('/').map(encodeURIComponent).join('/');
+  const headers = { 'Content-Type': 'text/plain; charset=utf-8', 'X-Board-Client': '1' };
+  if (!force) headers['X-Bench-Stamp'] = stamp;   // conditional: the server refuses if the file moved on
+  let res, out;
+  try {
+    res = await fetch(url, { method: 'PUT', headers, body: text });
+    out = await res.json();
+  } catch (e) { meta.textContent = 'save failed: ' + e.message; return; }
+  if (res.status === 409) {
+    meta.textContent = 'changed on disk';
+    if (confirm(name + ' changed on disk since you opened it.\n\nOK = overwrite with your version · Cancel = keep editing'))
+      return benchSave(true);
+    return;
+  }
+  if (!res.ok) { meta.textContent = 'save failed: ' + (out.error || res.statusText); return; }
+  // saved: the buffer is now the baseline, the row's size/mtime catch up, no refetch needed
+  benchEdit = { name, rel, stamp: out.stamp, text };
+  const f = benchFiles.find(x => x.name === name && !x.dir);
+  if (f) { f.size = out.size; f.mtime = out.mtime; f.stamp = out.stamp; }
+  $('#pv-edit').oninput();
+  meta.textContent = 'saved ' + fmtWhen(out.mtime).slice(11) + ' · ' + fmtSize(out.size);
+  showToast({ action: 'bench', title: name, detail: 'saved · ' + fmtSize(out.size) });
 }
 
 /* open a folder (and optionally a file in it), then reflect it in the URL */
@@ -2134,6 +2335,7 @@ if (BENCH_MODE) {
   // rows: folders open on click, files open in the preview; the ⤓ link downloads as before
   $('#bench-list').addEventListener('click', ev => {
     if (ev.target.closest('.bd')) return;
+    if (!benchLeaveOk()) return;
     const dirRow = ev.target.closest('.bf.dir');
     if (dirRow) { benchGo(dirRow.dataset.rel).catch(e => alert(e.message)); return; }
     const fileRow = ev.target.closest('.bf.file');
@@ -2150,14 +2352,19 @@ if (BENCH_MODE) {
   });
   $('#bench-path').addEventListener('click', ev => {
     const b = ev.target.closest('button[data-rel]');
-    if (b) benchGo(b.dataset.rel).catch(e => alert(e.message));
+    if (b && benchLeaveOk()) benchGo(b.dataset.rel).catch(e => alert(e.message));
   });
   // ‹ Back walks the folders/files opened on this page, then leaves for the board
-  $('#bench-back').onclick = () => { if (history.state?.depth > 0) history.back(); else location.href = '/'; };
+  $('#bench-back').onclick = () => { if (!benchLeaveOk()) return; if (history.state?.depth > 0) history.back(); else location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
   });
-  window.addEventListener('popstate', () => { const { p, f } = benchParams(); benchGo(p, f, false).catch(() => {}); });
+  window.addEventListener('popstate', () => {
+    // back/forward can't be vetoed, so an unwanted leave is undone by re-pushing where we were
+    if (!benchLeaveOk()) { benchSyncUrl(true); return; }
+    const { p, f } = benchParams(); benchGo(p, f, false).catch(() => {});
+  });
+  window.addEventListener('beforeunload', ev => { if (benchDirty()) { ev.preventDefault(); ev.returnValue = ''; } });
   // a bare /bench opens the folder remembered from last time; ?p= in the URL wins
   const { p, f } = benchParams();
   benchGo(location.search ? p : benchCwd, f, false).catch(e => alert(e.message));
