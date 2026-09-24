@@ -1255,6 +1255,11 @@ PAGE = r"""<!doctype html>
     background: var(--inset); color: var(--ink); font: 12px/1.55 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
   }
   .pv-edit:focus { box-shadow: inset 0 0 0 1px rgba(65,216,247,.35); }
+  /* editing: the pane lifts out of the grid and takes the whole viewport */
+  .preview.full { position: fixed; inset: 0; z-index: 60; max-height: none; min-height: 0; border-radius: 0; background: var(--panel); }
+  .preview.full .pv-head { padding: 12px 18px; }
+  .preview.full .pv-edit { min-height: 0; font-size: 13px; padding: 16px 20px; }
+  body.editing-full { overflow: hidden; }
   .pv-text { margin: 0; font: 12px/1.55 var(--mono); color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
   .pv-img {
     display: block; max-width: 100%; height: auto; margin: 0 auto;
@@ -2183,6 +2188,7 @@ const pvEditBtn = () => `<button class="pv-ed" id="pv-edit-btn" title="edit in p
 async function previewFile(name) {
   benchEdit = null;
   $('#pv-body').classList.remove('editing');
+  $('#preview').classList.remove('full'); document.body.classList.remove('editing-full');
   benchFile = name || '';
   document.querySelectorAll('.bf.file').forEach(r => r.classList.toggle('sel', r.dataset.name === benchFile));
   const head = $('#pv-head'), body = $('#pv-body');
@@ -2228,6 +2234,7 @@ function benchEditStart(src) {
     `<button class="pv-ed save" id="pv-save" disabled>save</button>` +
     `<button class="pv-ed" id="pv-cancel" title="back to preview (esc)">cancel</button>`;
   body.classList.add('editing');
+  $('#preview').classList.add('full'); document.body.classList.add('editing-full');
   body.innerHTML = `<textarea class="pv-edit" id="pv-edit" spellcheck="false"></textarea>`;
   const ta = $('#pv-edit');
   ta.value = src.text;

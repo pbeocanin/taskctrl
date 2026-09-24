@@ -68,7 +68,7 @@ write call-ready notes when it ships.
   render as markdown (the board's own renderer, same as task notes), and anything
   text-like (`.txt`, `.log`, `.csv`, `.json`, `.js`, `.py`, `.html` source, …) shows as
   text; other types offer a download. Text previews stop at 2 MB. Any text preview has
-  an `✎ edit` button: the pane becomes an editor, `Ctrl+S` or `save` writes the file
+  an `✎ edit` button: the pane takes over the whole viewport as an editor, `Ctrl+S` or `save` writes the file
   back in place (only existing files, same 2 MB cap, written to a temp file and swapped
   in). A save is conditional on the file not having changed on disk since it was
   opened — if an agent rewrote it meanwhile you get a choice to overwrite or keep
