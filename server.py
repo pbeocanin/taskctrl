@@ -2100,9 +2100,8 @@ const benchDrop = $('#bench-drop');
 const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
   : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
 
-/* the open folder, relative to ~/bench ("" = root); remembered across reloads */
+/* the open folder in canonical form ("" = ~/bench root, "a/b", "~", "~/a/b") */
 let benchCwd = '';
-try { benchCwd = localStorage.getItem('taskctrl.benchCwd') || ''; } catch {}
 let benchFile = '';   // file open in the preview pane ('' = none)
 /* dotfiles (.env, .gitignore…) are listed by the server; the toggle only hides them in this browser */
 let benchHidden = true;
@@ -2147,11 +2146,10 @@ async function loadBench(rel = benchCwd) {
   let d;
   try { d = await api('GET', '/api/bench?path=' + encodeURIComponent(rel)); }
   catch (e) {
-    if (rel) { benchCwd = ''; return loadBench(''); } // remembered folder is gone → back to root
+    if (rel) { benchCwd = ''; return loadBench(''); } // linked folder is gone → back to root
     throw e;
   }
   benchCwd = d.path; benchFiles = d.files;
-  try { localStorage.setItem('taskctrl.benchCwd', benchCwd); } catch {}
   renderBenchCrumb(benchCwd);
   const list = $('#bench-list');
   // the server names the folder above (from the bench root that's the home tree; none at ~)
@@ -2391,9 +2389,9 @@ if (BENCH_MODE) {
     const { p, f } = benchParams(); benchGo(p, f, false).catch(() => {});
   });
   window.addEventListener('beforeunload', ev => { if (benchDirty()) { ev.preventDefault(); ev.returnValue = ''; } });
-  // a bare /bench opens the folder remembered from last time; ?p= in the URL wins
+  // a bare /bench opens the bench root; ?p= / ?f= in the URL open a folder or file directly
   const { p, f } = benchParams();
-  benchGo(location.search ? p : benchCwd, f, false).catch(e => alert(e.message));
+  benchGo(p, f, false).catch(e => alert(e.message));
 }
 
 $('#review-all').onclick = async ev => {

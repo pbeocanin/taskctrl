@@ -85,7 +85,7 @@ write call-ready notes when it ships.
   their original name (a clash gets a `-2`, `-3` suffix, never an overwrite), or drag
   a file straight onto a folder row. Folder and open file live in the URL
   (`/bench?p=sub/folder&f=name`) so back/forward and bookmarks work; a bare `/bench`
-  reopens the last folder. Real upload progress per file, a toast on arrival, and a
+  opens the bench root. Real upload progress per file, a toast on arrival, and a
   listing sorted folders first then A→Z, with a `⤓` download link per row. Folders can't be created from
   the browser and delete is deliberately absent — those are shell jobs.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
