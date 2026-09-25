@@ -15,6 +15,8 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -332,8 +334,131 @@ def normalize_subtasks(incoming, existing, now):
     return out
 
 
+# ---- self-update: every install keeps itself on origin/main -------------------
+# Installs are independent git clones on other machines, so nothing can push a
+# release to them; instead each server fetches origin/main (30 s after boot, then
+# hourly), fast-forwards when behind, and re-executes itself in place once no
+# request is in flight. TASKCTRL_AUTOUPDATE=0 keeps the hourly check but never
+# pulls or restarts on its own; POST /api/update still does, on request.
+AUTOUPDATE = os.environ.get("TASKCTRL_AUTOUPDATE", "1").lower() not in ("0", "false", "no", "off")
+UPDATE_EVERY = 3600
+BOOT_TS = now_iso()
+_inflight = 0                 # requests being handled right now; a restart waits for 0
+_inflight_lock = threading.Lock()
+_update_lock = threading.Lock()   # one check at a time
+_update = {"state": "unknown", "detail": "", "commit": None, "remote": None, "behind": 0,
+           "log": [], "checked_at": None}
+
+
+def _git(*args, timeout=60):
+    r = subprocess.run(["git", *args], cwd=BASE_DIR, capture_output=True, text=True, timeout=timeout)
+    if r.returncode:
+        lines = (r.stderr or r.stdout).strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else f"git {args[0]} failed")
+    return r.stdout.strip()
+
+
+def _running_commit():
+    try:
+        return _git("rev-parse", "HEAD")
+    except Exception:
+        return None
+
+
+RUNNING_COMMIT = _running_commit()   # the code this process is actually executing
+
+
+def update_check(apply):
+    """One pass: fetch origin/main, compare, and — when `apply` — pull and restart.
+
+    States: current · behind (not applied: opt-out) · held (local edits to tracked
+    files, never overwritten) · updating (pull + restart in progress) · error
+    (git/network trouble, retried next hour). Never raises."""
+    global _update
+    if not _update_lock.acquire(blocking=False):
+        return dict(_update)   # a check is already running
+    st = {"checked_at": now_iso(), "log": [], "detail": ""}
+    try:
+        st["commit"] = _git("rev-parse", "HEAD")
+        _git("fetch", "--quiet", "origin", "main")
+        st["remote"] = _git("rev-parse", "origin/main")
+        st["behind"] = int(_git("rev-list", "--count", "HEAD..origin/main"))
+        if st["behind"]:
+            st["log"] = _git("log", "--format=%s", "HEAD..origin/main").splitlines()[:20]
+        dirty = _git("status", "--porcelain", "--untracked-files=no")
+        if st["behind"] and dirty:
+            st["state"], st["detail"] = "held", "local changes to tracked files — git pull by hand"
+        elif st["behind"] and not apply:
+            st["state"], st["detail"] = "behind", "auto-update is off (TASKCTRL_AUTOUPDATE=0)"
+        elif st["behind"]:
+            st["state"], st["detail"] = "updating", f"pulling {st['behind']} commit(s)"
+            threading.Thread(target=_apply_update, daemon=True).start()
+        elif st["commit"] != RUNNING_COMMIT:
+            # someone ran git pull by hand (or a pull couldn't restart earlier): run the new code
+            st["state"], st["detail"] = "updating", "restarting onto the pulled code"
+            threading.Thread(target=_restart, daemon=True).start()
+        else:
+            st["state"] = "current"
+    except Exception as e:
+        st["state"], st["detail"] = "error", str(e)[:300]
+    finally:
+        _update = {**_update, **st}
+        _update_lock.release()
+    return dict(_update)
+
+
+def _apply_update():
+    global _update
+    try:
+        _git("pull", "--ff-only", "--quiet", "origin", "main", timeout=120)
+    except Exception as e:
+        _update = {**_update, "state": "error", "detail": "pull: " + str(e)[:300]}
+        return
+    _restart()
+
+
+def _restart():
+    """Re-exec this process in place (same pid, argv and env — fine under systemd,
+    launchd or a plain nohup) once no request is being served, so an upload or a
+    save is never cut off. Gives up after two minutes; the next check retries."""
+    global _update
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        with _inflight_lock:
+            quiet = _inflight == 0
+        if quiet:
+            with _lock:   # no write to tasks.json can be mid-flight either
+                print(f"[update] restarting onto {_running_commit()}", flush=True)
+                sys.stdout.flush(); sys.stderr.flush()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+        time.sleep(0.5)
+    _update = {**_update, "state": "error", "detail": "pulled, but the server stayed busy — restart pending"}
+
+
+def _update_loop():
+    time.sleep(30)
+    while True:
+        update_check(apply=AUTOUPDATE)
+        time.sleep(UPDATE_EVERY)
+
+
+def update_status():
+    return {**_update, "running": RUNNING_COMMIT, "boot": BOOT_TS, "autoupdate": AUTOUPDATE}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TaskBoard/2.0"
+
+    def handle_one_request(self):
+        # count requests in flight so a self-update restart can wait for quiet
+        global _inflight
+        with _inflight_lock:
+            _inflight += 1
+        try:
+            super().handle_one_request()
+        finally:
+            with _inflight_lock:
+                _inflight -= 1
 
     # ---- helpers -------------------------------------------------------
 
@@ -384,7 +509,12 @@ class Handler(BaseHTTPRequestHandler):
             since = int(m.group(1)) if m else None
             with _lock:
                 evs = [] if since is None else [e for e in _events if e["seq"] > since]
-                self._json(200, {"seq": _event_seq, "events": evs})
+            # boot lets open tabs notice a restart and reload; update drives the header pill
+            u = _update
+            self._json(200, {"seq": _event_seq, "events": evs, "boot": BOOT_TS,
+                             "update": {"state": u["state"], "behind": u["behind"], "detail": u["detail"], "log": u["log"]}})
+        elif self.path == "/api/version":
+            self._json(200, update_status())
         elif self.path == "/api/bench" or self.path.startswith("/api/bench?"):
             m = re.search(r"[?&]path=([^&]*)", self.path)
             rel = bench_safe_rel(unquote(m.group(1)) if m else "")
@@ -412,6 +542,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/api/update":
+            # check now; pulls and restarts if behind (even with auto-update off — this is explicit)
+            return self._json(200, {**update_check(apply=True), "running": RUNNING_COMMIT, "boot": BOOT_TS})
         if self.path == "/api/tasks/mark-reviewed":
             # bulk "all filmed": flags every done-but-unreviewed task, archived included
             now = now_iso()
@@ -1227,6 +1360,8 @@ PAGE = r"""<!doctype html>
   .bf .bd:hover { color: var(--cyan); text-shadow: 0 0 8px rgba(65,216,247,.6); }
   .bench-empty { padding: 20px 4px; font: 11px var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
   .console .benchbtn { align-self: center; margin-right: 10px; }
+  .console .updpill { align-self: center; margin-right: 10px; color: var(--amber); border-color: var(--amber); }
+  .console .updpill.err { color: var(--red); border-color: var(--red); }
   /* preview pane */
   .preview {
     position: sticky; top: 20px; min-width: 0; display: flex; flex-direction: column;
@@ -1327,6 +1462,7 @@ PAGE = r"""<!doctype html>
   .toast.created { border-left-color: var(--green); }
   .toast.deleted { border-left-color: var(--red); }
   .toast.bench { border-left-color: var(--cyan); }
+  .toast.update { border-left-color: var(--amber); }
   .toast .trow { display: flex; align-items: baseline; gap: 8px; }
   .toast .tn { color: var(--cyan); font-weight: 600; flex: none; }
   .toast .td { color: var(--muted); flex: none; margin-left: auto; }
@@ -1353,6 +1489,7 @@ PAGE = r"""<!doctype html>
       <div class="ro done"><span class="l">COMPLETE</span><span class="v" id="ro-done">–</span></div>
     </div>
     <div class="clockbox"><span class="t" id="clock-t">--:--:--</span><span class="d" id="clock-d"></span></div>
+    <button class="updpill" id="upd-pill" style="display:none"></button>
     <a class="btnlink benchbtn" id="bench-btn" href="/bench">⬡ Bench</a>
     <button class="primary" id="new-btn">+ New Task</button>
   </header>
@@ -2426,11 +2563,33 @@ if (!BENCH_MODE) { refresh(); setInterval(refresh, 15000); } // pick up direct e
 
 /* ---------- toasts: live feed of changes made through the API ---------- */
 let evSeq = null; // last event seq seen; null until the first poll primes it
+/* self-update: the pill only appears when a human is needed (held / error / behind with
+   auto-update off); a restart is picked up via the boot stamp and the tab reloads itself
+   once nothing is mid-edit */
+let bootTs = null;
+const busyEditing = () => editMode || stEdit !== null || modalId === '' || (typeof benchDirty === 'function' && benchDirty());
+function updPill(u) {
+  const el = $('#upd-pill');
+  if (!u || !['held', 'error', 'behind'].includes(u.state)) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.classList.toggle('err', u.state === 'error');
+  el.textContent = u.state === 'error' ? '⬆ update failed' : `⬆ update · ${u.behind} commit${u.behind === 1 ? '' : 's'}`;
+  el.title = (u.detail ? u.detail + '\n' : '') + (u.log || []).map(l => '· ' + l).join('\n') + '\n\nclick to check / update now';
+}
+$('#upd-pill').onclick = async () => {
+  try {
+    const r = await api('POST', '/api/update', {});
+    showToast({ action: 'update', title: r.state, detail: r.detail || (r.behind ? r.behind + ' behind' : 'up to date') });
+  } catch (e) { alert(e.message); }
+};
 async function pollEvents() {
   let r;
   try {
     r = await api('GET', evSeq === null ? '/api/events' : '/api/events?since=' + evSeq);
   } catch (e) { return; } // server briefly down — next poll retries
+  updPill(r.update);
+  if (bootTs === null) bootTs = r.boot;
+  else if (r.boot && r.boot !== bootTs && !busyEditing()) { location.reload(); return; } // server restarted (self-update) → run the new page
   if (evSeq === null) { evSeq = r.seq; return; } // prime only, no toasts for history
   evSeq = r.seq;
   if (r.events.length && !BENCH_MODE) refresh(); // something changed — show it now, not in 15s
@@ -2443,13 +2602,14 @@ function showToast(e) {
   el.className = 'toast ' + e.action;
   el.innerHTML =
     `<div class="trow">` +
-      `<span class="tn">${e.action === 'bench' ? 'BENCH' : 'T' + String(e.num).padStart(2, '0')}</span>` +
+      `<span class="tn">${e.action === 'bench' ? 'BENCH' : e.action === 'update' ? 'UPDATE' : 'T' + String(e.num).padStart(2, '0')}</span>` +
       `<span class="td">${esc(e.detail || e.action)}</span>` +
     `</div>` +
     `<div class="tt">${esc(e.title)}</div>`;
   const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
   el.onclick = () => {
     dismiss();
+    if (e.action === 'update') return;
     if (e.action === 'bench') { if (BENCH_MODE) loadBench().catch(() => {}); else location.href = '/bench'; return; }
     if (e.action !== 'deleted' && tasks.find(t => t.id === e.task_id)) {
       modalId = e.task_id; editMode = false; stEdit = null; renderModal();
@@ -2469,5 +2629,7 @@ if __name__ == "__main__":
     if not os.path.exists(DB_PATH):
         save_db({"tasks": []})
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Task board on http://{HOST}:{PORT} (db: {DB_PATH})")
+    print(f"Task board on http://{HOST}:{PORT} (db: {DB_PATH}, commit: {(RUNNING_COMMIT or 'n/a')[:9]}, "
+          f"auto-update: {'on' if AUTOUPDATE else 'off'})", flush=True)
+    threading.Thread(target=_update_loop, daemon=True).start()
     server.serve_forever()
