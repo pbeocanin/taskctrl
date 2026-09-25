@@ -219,8 +219,7 @@ def bench_listing(rel=""):
             out.append({"name": e.name, "dir": e.is_dir(), "size": st.st_size,
                         "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
                         "stamp": bench_stamp(st)})
-    out.sort(key=lambda x: x["mtime"], reverse=True)
-    out.sort(key=lambda x: not x["dir"])  # stable: folders first, newest on top within each
+    out.sort(key=lambda x: (not x["dir"], x["name"].casefold(), x["name"]))  # folders first, then A→Z
     return out
 
 
@@ -2376,13 +2375,13 @@ if (BENCH_MODE) {
     const b = ev.target.closest('button[data-rel]');
     if (b && benchLeaveOk()) benchGo(b.dataset.rel).catch(e => alert(e.message));
   });
-  // ‹ Back walks the folders/files opened on this page, then leaves for the board
   $('#bench-hid').onclick = () => {
     benchHidden = !benchHidden;
     try { localStorage.setItem('taskctrl.benchHidden', benchHidden ? '1' : '0'); } catch {}
     loadBench().catch(() => {});
   };
-  $('#bench-back').onclick = () => { if (!benchLeaveOk()) return; if (history.state?.depth > 0) history.back(); else location.href = '/'; };
+  // ‹ Back always leaves for the board — folders are a breadcrumb click away
+  $('#bench-back').onclick = () => { if (benchLeaveOk()) location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
   });

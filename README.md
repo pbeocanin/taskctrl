@@ -86,7 +86,7 @@ write call-ready notes when it ships.
   a file straight onto a folder row. Folder and open file live in the URL
   (`/bench?p=sub/folder&f=name`) so back/forward and bookmarks work; a bare `/bench`
   reopens the last folder. Real upload progress per file, a toast on arrival, and a
-  newest-first listing with a `⤓` download link per row. Folders can't be created from
+  listing sorted folders first then A→Z, with a `⤓` download link per row. Folders can't be created from
   the browser and delete is deliberately absent — those are shell jobs.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
@@ -123,7 +123,7 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
 | `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
-| `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then newest files) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
+| `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
 | `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `/bench/~/a/b/file` reaches the home tree |
 | `PUT /bench/<path/to/file>`          | overwrite an existing file with the raw body (2 MB cap, atomic); `X-Bench-Stamp: <stamp from the listing>` makes it conditional → 409 if the file changed since |
