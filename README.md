@@ -88,6 +88,14 @@ write call-ready notes when it ships.
   opens the bench root. Real upload progress per file, a toast on arrival, and a
   listing sorted folders first then A→Z, with a `⤓` download link per row. Folders can't be created from
   the browser and delete is deliberately absent — those are shell jobs.
+- **Self-updating** — every install keeps itself on `origin/main`: the server fetches
+  30 s after boot and then hourly, fast-forwards when behind, and restarts itself in
+  place once no request is in flight (an upload or a save is never cut off). Local
+  edits to tracked files hold the update rather than being overwritten; a `git pull`
+  done by hand is picked up on the next check. Open tabs notice the restart and
+  reload themselves unless something is mid-edit. The header shows an amber pill only
+  when a human is needed (held, failing, or behind with auto-update off); click it to
+  check and update now. `TASKCTRL_AUTOUPDATE=0` turns off the automatic pull.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ![Task view](docs/task.png)
@@ -126,6 +134,8 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
 | `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `/bench/~/a/b/file` reaches the home tree |
+| `GET /api/version`                   | self-update state: `current` · `behind` · `held` · `updating` · `error`, running commit, boot time, commits behind and their messages |
+| `POST /api/update`                   | check `origin/main` now and, if behind and clean, pull and restart (works even with auto-update off) |
 | `PUT /bench/<path/to/file>`          | overwrite an existing file with the raw body (2 MB cap, atomic); `X-Bench-Stamp: <stamp from the listing>` makes it conditional → 409 if the file changed since |
 
 ```bash

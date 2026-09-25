@@ -176,8 +176,13 @@ curl -s -X POST localhost:8100/api/tasks -H 'Content-Type: application/json' \
   it to the internet.
 - **Backups:** `tasks.json` is the whole database; copy it and `images/` and you have
   everything.
-- **Upgrading:** `git pull` in the install directory and restart the service. Data
-  files are gitignored, so a pull never touches them.
+- **Upgrading:** automatic. The server checks `origin/main` 30 s after boot and hourly,
+  pulls when behind, and restarts itself in place (same pid, so systemd/launchd are
+  fine). Data files are gitignored, so a pull never touches them. `curl -s -X POST
+  localhost:8100/api/update` forces a check; `curl -s localhost:8100/api/version` shows
+  the state. If you've edited `server.py` locally the update is **held** (amber pill in
+  the header) until you commit, stash or revert — it never overwrites your changes.
+  `Environment=TASKCTRL_AUTOUPDATE=0` in the service turns the automatic pull off.
 
 ## Done-checklist for Claude
 
