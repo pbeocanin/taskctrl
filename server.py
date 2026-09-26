@@ -1402,7 +1402,7 @@ PAGE = r"""<!doctype html>
     background: var(--inset); color: var(--ink); font: 12px/1.55 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
   }
   .pv-edit:focus { box-shadow: inset 0 0 0 1px rgba(65,216,247,.35); }
-  /* editing: the pane lifts out of the grid and takes the whole viewport */
+  /* maximized (⛶ full, or editing): the pane lifts out of the grid and takes the whole viewport */
   .preview.full { position: fixed; inset: 0; z-index: 60; max-height: none; min-height: 0; border-radius: 0; background: var(--panel); }
   .preview.full .pv-head { padding: 12px 18px; }
   .preview.full .pv-edit { min-height: 0; font-size: 13px; padding: 16px 20px; }
@@ -2210,6 +2210,7 @@ document.addEventListener('keydown', ev => {
   }
   if (BENCH_MODE && benchEdit && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') { ev.preventDefault(); benchSave(); return; }
   if (ev.key === 'Escape' && BENCH_MODE && benchEdit) { benchEditStop(); return; }
+  if (ev.key === 'Escape' && BENCH_MODE && benchFull) { benchSetFull(false); return; }
   if (ev.key === 'Escape' && BENCH_MODE && benchFile) { previewFile(''); benchSyncUrl(true); return; }
   if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
@@ -2337,12 +2338,21 @@ const benchDirty = () => !!benchEdit && $('#pv-edit')?.value !== benchEdit.text;
 /* every way out of the editor asks first when there are unsaved changes */
 const benchLeaveOk = () => !benchDirty() || confirm('Discard unsaved changes to ' + benchEdit.name + '?');
 const pvEditBtn = () => `<button class="pv-ed" id="pv-edit-btn" title="edit in place">✎ edit</button>`;
+/* maximized pane: the preview lifts out of the grid and takes the whole viewport, header
+   controls included. Sticks while browsing files; closing the file or esc restores the split. */
+let benchFull = false;
+function benchSetFull(on) {
+  benchFull = !!on;
+  $('#preview').classList.toggle('full', benchFull); document.body.classList.toggle('editing-full', benchFull);
+  const b = $('#pv-full');
+  if (b) { b.textContent = benchFull ? '⤡ restore' : '⛶ full'; b.title = benchFull ? 'back to split view (esc)' : 'maximize the preview'; }
+}
 
 async function previewFile(name) {
   benchEdit = null;
   $('#pv-body').classList.remove('editing', 'framed');
-  $('#preview').classList.remove('full'); document.body.classList.remove('editing-full');
   benchFile = name || '';
+  benchSetFull(benchFull && !!benchFile);   // a closed pane is never maximized
   document.querySelectorAll('.bf.file').forEach(r => r.classList.toggle('sel', r.dataset.name === benchFile));
   const head = $('#pv-head'), body = $('#pv-body');
   if (!benchFile) {
@@ -2355,7 +2365,9 @@ async function previewFile(name) {
   const dl = `<a class="pv-dl" href="${benchUrl(benchFile)}" download="${esc(benchFile)}">⤓ download</a>`;
   head.innerHTML = `<span class="pn" title="${esc(benchLabel(benchCwd) + '/' + benchFile)}">${esc(benchFile)}</span>` +
     `<span class="pm">${f ? fmtSize(f.size) + ' · ' + esc(fmtWhen(f.mtime)) : ''}</span>${f ? dl : ''}` +
+    (f ? `<button class="pv-ed" id="pv-full"></button>` : '') +
     `<button class="pv-x" id="pv-x" title="close (esc)">✕</button>`;
+  benchSetFull(benchFull);   // labels the new button
   if (!f) { body.innerHTML = '<div class="pv-empty">no such file in this folder</div>'; return; }
   if (IMG_EXT.has(ext)) { body.innerHTML = `<img class="pv-img" src="${benchUrl(benchFile, true)}" alt="${esc(benchFile)}">`; return; }
   if (!TEXT_EXT.has(ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
@@ -2380,7 +2392,7 @@ async function previewFile(name) {
       body.scrollTop = 0;
       document.querySelectorAll('#pv-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === benchTab));
     };
-    $('#pv-x').insertAdjacentHTML('beforebegin',
+    $('#pv-full').insertAdjacentHTML('beforebegin',
       `<span class="seg pv-tabs" id="pv-tabs"><button data-tab="preview">preview</button><button data-tab="text">text</button></span>`);
     $('#pv-tabs').onclick = ev => {
       const b = ev.target.closest('button'); if (!b || b.dataset.tab === benchTab) return;
@@ -2396,7 +2408,7 @@ async function previewFile(name) {
     body.scrollTop = 0;
   }
   // text is editable: the button carries the text and the change stamp the file had when loaded
-  $('#pv-x').insertAdjacentHTML('beforebegin', pvEditBtn());
+  $('#pv-full').insertAdjacentHTML('beforebegin', pvEditBtn());
   $('#pv-edit-btn').onclick = () => benchEditStart({ name: benchFile, rel: benchCwd, stamp: f.stamp, text });
 }
 
@@ -2560,6 +2572,7 @@ if (BENCH_MODE) {
   $('#bench-back').onclick = () => { if (benchLeaveOk()) location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
+    else if (ev.target.closest('#pv-full')) benchSetFull(!benchFull);
   });
   window.addEventListener('popstate', () => {
     // back/forward can't be vetoed, so an unwanted leave is undone by re-pushing where we were

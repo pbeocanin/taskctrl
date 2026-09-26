@@ -71,7 +71,8 @@ write call-ready notes when it ships.
   stylesheets in the same folder still load) — with a `preview | text` toggle that's
   remembered per browser, and anything text-like (`.txt`, `.log`, `.csv`, `.json`,
   `.js`, `.py`, …) shows as text; other types offer a download. Text previews stop at
-  2 MB. Any text preview has
+  2 MB. A `⛶ full` button in the pane header maximizes the pane to the whole viewport
+  with its controls intact (`esc` or `⤡ restore` brings the split view back). Any text preview has
   an `✎ edit` button: the pane takes over the whole viewport as an editor, `Ctrl+S` or `save` writes the file
   back in place (only existing files, same 2 MB cap, written to a temp file and swapped
   in). A save is conditional on the file not having changed on disk since it was
