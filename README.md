@@ -46,10 +46,6 @@ write call-ready notes when it ships.
   queued, with badges only on non-normal priorities
 - **Pinned · Call Agenda** — pin tasks into an agenda section at the top for your next
   update call; pinning moves the row there and ignores filters
-- **To Film view** — completed tasks carry a `● REC` chip until you mark them "filmed"
-  (covered in an update video / demo / changelog). The view lists everything done but
-  not yet filmed, whenever it was closed, with a one-click **All filmed**. Reopening a
-  task resets the flag, so a fresh completion is filmable again.
 - **Prod-shape warning** — flag a task whose work changes the shape of production data
   (a migration, a column reinterpretation). It gets a pulsing red `PROD SHAPE` badge and
   a red row edge, and it ignores project/type/priority filters so it can't hide. Clear it
@@ -134,7 +130,6 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>`             | delete task (and its image files)                     |
 | `POST /api/tasks/<id>/images`        | attach an image — raw bytes, `Content-Type: image/*`  |
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
-| `POST /api/tasks/mark-reviewed`      | mark every done-but-unfilmed task as filmed           |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
@@ -172,8 +167,6 @@ Task shape:
   "pinned": false,
   "archived": false,
   "prod_shape": true,
-  "reviewed": true,
-  "reviewed_at": "2026-07-31T18:00:00 — present only while reviewed",
   "images": ["a1b2c3d4e5f6-9f3a2b.png"],
   "created_at": "2026-07-31T12:00:00",
   "updated_at": "2026-07-31T12:34:56",
@@ -188,12 +181,11 @@ and matches to existing items by text. In both cases the server owns `id`,
 unstamped if unchecked. Same for tasks: flipping status to `done` sets `completed_at`,
 reopening clears it.
 
-**Metadata toggles** — `pinned`, `archived`, `reviewed`, and `prod_shape` are flags
-about a task rather than work on it. `PUT {"archived": true}` archives (server stamps
-`archived_at`); `PUT {"reviewed": true}` marks it filmed (stamps `reviewed_at`; any
-later status change clears both); `PUT {"prod_shape": true}` raises the red prod-shape
-warning, `false` clears it. Pin, archive, and filmed toggles don't bump `updated_at`
-and don't emit toasts; prod-shape does both, since it's a warning you want to see.
+**Metadata toggles** — `pinned`, `archived`, and `prod_shape` are flags about a task
+rather than work on it. `PUT {"archived": true}` archives (server stamps
+`archived_at`); `PUT {"prod_shape": true}` raises the red prod-shape warning, `false`
+clears it. Pin and archive toggles don't bump `updated_at` and don't emit toasts;
+prod-shape does both, since it's a warning you want to see.
 
 **Events** — `GET /api/events` returns `{"seq": <latest>, "events": [...]}`, each event
 being `{"seq", "ts", "actor", "action", "task_id", "num", "title", "detail"}`. Without

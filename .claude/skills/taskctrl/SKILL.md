@@ -69,12 +69,6 @@ else, it gets a task.
   without deleting it. Set via `PUT {"archived": true|false}`; the server manages
   `archived_at` and doesn't bump `updated_at` for it. Archive only when asked. Prefer
   archiving over deleting for anything with history worth keeping.
-- **reviewed** — "filmed": this completed task has been covered in an update video /
-  demo / changelog. Done tasks show a `● REC` chip until it's set; the board's To Film
-  view lists them. Set via `PUT {"reviewed": true}` only when the user says the task
-  has been filmed/covered (or use `POST /api/tasks/mark-reviewed` when they say
-  "everything's filmed"). The server stamps `reviewed_at`, doesn't bump `updated_at`,
-  and clears the flag on any later status change.
 - **prod_shape** — a red "handle with care" warning: this task changes the shape of
   data that already exists in production (a schema migration, reinterpreting a
   column, re-encoding stored rows). Set `PUT {"prod_shape": true}` when starting such
@@ -117,7 +111,6 @@ All paths are relative to the board URL from the Setup block.
 - **Update:** `PUT /api/tasks/<id>` with just the fields to change (partial updates
   preserve everything else). The server bumps `updated_at` (except pin-only toggles).
 - **Delete:** `DELETE /api/tasks/<id>`.
-- **Bulk filmed:** `POST /api/tasks/mark-reviewed` flags every done-but-unreviewed task.
 - **Find an id:** `GET /api/tasks` and match on `num` (task numbers are what the user
   says; ids are what the API wants).
 
