@@ -669,25 +669,34 @@ class Handler(BaseHTTPRequestHandler):
     def _bench_download(self, raw):
         # /bench/<file> or /bench/<sub>/<folder>/<file>, optionally ?inline=1 for
         # the bench page's preview pane
+        # the bench page's preview pane, or ?raw=1 for its rendered html/svg preview
         raw, _, query = raw.partition("?")
-        inline = "inline=1" in query.split("&")
+        params = query.split("&")
+        inline, rendered = "inline=1" in params, "raw=1" in params
         hit = self._bench_file(raw)
         if not hit:
             return self._json(404, {"error": "not found"})
         rel, name, path = hit
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        if inline:
+        sandboxed = ctype in ("text/html", "image/svg+xml", "application/xhtml+xml")
+        if inline and not rendered:
             # images keep their type; everything else is shown as plain text so an
             # .html or .svg dropped in bench can never run scripts on the board's origin
             if not ctype.startswith("image/") or ctype == "image/svg+xml":
                 ctype = "text/plain; charset=utf-8"
         size = os.path.getsize(path)
         self.send_response(200)
+        if rendered and sandboxed:
+            # rendered as a real document, but inside a CSP sandbox: the page gets an
+            # opaque origin, so its scripts can't read the board's storage or act on
+            # the API as the board. Relative images/styles still resolve to siblings.
+            self.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+            ctype += "; charset=utf-8"   # a file without <meta charset> still reads right
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Disposition",
-                         ("inline" if inline else "attachment") + f"; filename*=UTF-8''{quote(name)}")
+                         ("inline" if inline or rendered else "attachment") + f"; filename*=UTF-8''{quote(name)}")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(path, "rb") as f:
@@ -1383,7 +1392,11 @@ PAGE = r"""<!doctype html>
   .pv-head .pv-ed.save:disabled { opacity: .35; cursor: default; box-shadow: none; }
   .pv-head .pv-dirty { color: var(--amber); font-size: 14px; line-height: 1; }
   .pv-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; }
-  .pv-body.editing { padding: 0; display: flex; overflow: hidden; }
+  .pv-body.editing, .pv-body.framed { padding: 0; display: flex; overflow: hidden; }
+  .pv-frame { flex: 1; min-height: 0; width: 100%; border: none; background: #fff; }
+  .pv-head .pv-tabs { margin: 0; }
+  .pv-head .pv-tabs button { padding: 3px 9px; font: 600 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .pv-head .pv-tabs button.on { background: rgba(65,216,247,.15); color: var(--cyan); }
   .pv-edit {
     flex: 1; width: 100%; min-height: 60vh; margin: 0; padding: 14px 16px; border: 0; outline: 0; resize: none;
     background: var(--inset); color: var(--ink); font: 12px/1.55 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
@@ -2247,8 +2260,9 @@ let benchFiles = [];  // listing of the open folder, as the server returned it
 const benchJoin = (rel, name) => rel ? rel + '/' + name : name;
 const benchHome = rel => rel === '~' || rel.startsWith('~/');   // a path in the home tree rather than under ~/bench
 const benchLabel = rel => benchHome(rel) ? rel : '~/bench' + (rel ? '/' + rel : '');
-const benchUrl = (name, inline) =>
-  '/bench/' + benchJoin(benchCwd, name).split('/').map(encodeURIComponent).join('/') + (inline ? '?inline=1' : '');
+const benchUrl = (name, mode) =>
+  '/bench/' + benchJoin(benchCwd, name).split('/').map(encodeURIComponent).join('/') +
+  (mode === 'raw' ? '?raw=1' : mode ? '?inline=1' : '');
 const fmtWhen = m => m.replace('T', ' ').slice(0, 16);
 
 /* folder + open file live in the URL (?p=folder&f=file) so back/forward and bookmarks work */
@@ -2305,8 +2319,13 @@ async function loadBench(rel = benchCwd) {
       `<a class="bd" href="${benchUrl(f.name)}" download="${esc(f.name)}" title="download">⤓</a></div>`).join('');
 }
 
-/* what the pane can show: images inline, markdown rendered, anything text-like as text */
+/* what the pane can show: images inline, markdown rendered, html/svg rendered in a
+   sandboxed frame (with a text tab), anything text-like as text */
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp']);
+const RENDER_EXT = new Set(['html', 'htm', 'svg']);
+/* which tab html/svg files open on — remembered per browser, preview by default */
+let benchTab = 'preview';
+try { if (localStorage.getItem('taskctrl.benchTab') === 'text') benchTab = 'text'; } catch {}
 const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'jsonl', 'js', 'mjs', 'cjs', 'ts',
   'py', 'sh', 'bash', 'zsh', 'html', 'htm', 'css', 'svg', 'xml', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg',
   'env', 'sql', 'diff', 'patch', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'php', 'lock', 'gitignore']);
@@ -2321,7 +2340,7 @@ const pvEditBtn = () => `<button class="pv-ed" id="pv-edit-btn" title="edit in p
 
 async function previewFile(name) {
   benchEdit = null;
-  $('#pv-body').classList.remove('editing');
+  $('#pv-body').classList.remove('editing', 'framed');
   $('#preview').classList.remove('full'); document.body.classList.remove('editing-full');
   benchFile = name || '';
   document.querySelectorAll('.bf.file').forEach(r => r.classList.toggle('sel', r.dataset.name === benchFile));
@@ -2350,10 +2369,32 @@ async function previewFile(name) {
     text = await r.text();
   } catch (e) { if (benchFile === want) body.innerHTML = `<div class="pv-empty">${esc(e.message)}</div>`; return; }
   if (benchFile !== want) return; // user clicked another file while this one loaded
-  body.innerHTML = (ext === 'md' || ext === 'markdown')
-    ? `<div class="md">${md(text)}</div>`
-    : `<pre class="pv-text">${esc(text)}</pre>`;
-  body.scrollTop = 0;
+  if (RENDER_EXT.has(ext)) {
+    // rendered by default in a frame the server sandboxes (opaque origin), text on demand
+    const src = benchUrl(benchFile, 'raw');
+    const show = () => {
+      body.classList.toggle('framed', benchTab === 'preview');
+      body.innerHTML = benchTab === 'preview'
+        ? `<iframe class="pv-frame" src="${src}" sandbox="allow-scripts allow-forms allow-popups allow-modals" title="${esc(benchFile)}"></iframe>`
+        : `<pre class="pv-text">${esc(text)}</pre>`;
+      body.scrollTop = 0;
+      document.querySelectorAll('#pv-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === benchTab));
+    };
+    $('#pv-x').insertAdjacentHTML('beforebegin',
+      `<span class="seg pv-tabs" id="pv-tabs"><button data-tab="preview">preview</button><button data-tab="text">text</button></span>`);
+    $('#pv-tabs').onclick = ev => {
+      const b = ev.target.closest('button'); if (!b || b.dataset.tab === benchTab) return;
+      benchTab = b.dataset.tab;
+      try { localStorage.setItem('taskctrl.benchTab', benchTab); } catch {}
+      show();
+    };
+    show();
+  } else {
+    body.innerHTML = (ext === 'md' || ext === 'markdown')
+      ? `<div class="md">${md(text)}</div>`
+      : `<pre class="pv-text">${esc(text)}</pre>`;
+    body.scrollTop = 0;
+  }
   // text is editable: the button carries the text and the change stamp the file had when loaded
   $('#pv-x').insertAdjacentHTML('beforebegin', pvEditBtn());
   $('#pv-edit-btn').onclick = () => benchEditStart({ name: benchFile, rel: benchCwd, stamp: f.stamp, text });
@@ -2367,7 +2408,7 @@ function benchEditStart(src) {
     `<span class="pm" id="pv-edit-meta">editing · ctrl+s saves</span>` +
     `<button class="pv-ed save" id="pv-save" disabled>save</button>` +
     `<button class="pv-ed" id="pv-cancel" title="back to preview (esc)">cancel</button>`;
-  body.classList.add('editing');
+  body.classList.remove('framed'); body.classList.add('editing');
   $('#preview').classList.add('full'); document.body.classList.add('editing-full');
   body.innerHTML = `<textarea class="pv-edit" id="pv-edit" spellcheck="false"></textarea>`;
   const ta = $('#pv-edit');

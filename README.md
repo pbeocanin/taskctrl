@@ -65,9 +65,13 @@ write call-ready notes when it ships.
 - **Bench page** — the `⬡ Bench` header button opens `/bench`, a full page for a plain
   scratch folder (`~/bench` by default, `TASKCTRL_BENCH` to override). Left: the file
   list and a drop zone. Right: a preview pane — images render inline, `.md` files
-  render as markdown (the board's own renderer, same as task notes), and anything
-  text-like (`.txt`, `.log`, `.csv`, `.json`, `.js`, `.py`, `.html` source, …) shows as
-  text; other types offer a download. Text previews stop at 2 MB. Any text preview has
+  render as markdown (the board's own renderer, same as task notes), `.html` and `.svg`
+  files render as a page by default — inside a sandboxed frame (opaque origin, so a
+  dropped page's scripts can't touch the board's storage or API; sibling images and
+  stylesheets in the same folder still load) — with a `preview | text` toggle that's
+  remembered per browser, and anything text-like (`.txt`, `.log`, `.csv`, `.json`,
+  `.js`, `.py`, …) shows as text; other types offer a download. Text previews stop at
+  2 MB. Any text preview has
   an `✎ edit` button: the pane takes over the whole viewport as an editor, `Ctrl+S` or `save` writes the file
   back in place (only existing files, same 2 MB cap, written to a temp file and swapped
   in). A save is conditional on the file not having changed on disk since it was
@@ -133,7 +137,7 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
-| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `/bench/~/a/b/file` reaches the home tree |
+| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `?raw=1` serves it with its real type for the rendered preview, `.html`/`.svg` behind a `Content-Security-Policy: sandbox` header; `/bench/~/a/b/file` reaches the home tree |
 | `GET /api/version`                   | self-update state: `current` · `behind` · `held` · `updating` · `error`, running commit, boot time, commits behind and their messages |
 | `POST /api/update`                   | check `origin/main` now and, if behind and clean, pull and restart (works even with auto-update off) |
 | `PUT /bench/<path/to/file>`          | overwrite an existing file with the raw body (2 MB cap, atomic); `X-Bench-Stamp: <stamp from the listing>` makes it conditional → 409 if the file changed since |
