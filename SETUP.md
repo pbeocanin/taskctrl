@@ -139,6 +139,17 @@ Then edit the **Setup** block at the top of the copied file: set the board URL (
 your port) and the board directory (your clone path). Those are the only two lines to
 touch.
 
+**Codex** gets the same skill from `.agents/skills/taskctrl/SKILL.md` (identical body,
+Codex-flavoured setup block). Inside the repo Codex finds it on its own; for every
+project, copy it to Codex's global skills folder and edit the same two lines:
+
+```bash
+mkdir -p ~/.codex/skills/taskctrl
+cp ~/taskctrl/.agents/skills/taskctrl/SKILL.md ~/.codex/skills/taskctrl/SKILL.md
+```
+
+Newer Codex builds also read `~/.agents/skills/`; either location works.
+
 ## 6. Make Claude actually use it
 
 A globally installed skill is available, but Claude only loads it when it decides the
@@ -153,6 +164,9 @@ as the work happens.
 
 Use your real URL. This is the step people skip and then wonder why the board stays
 empty.
+
+For Codex the equivalent home is `AGENTS.md`: put the same line in `~/.codex/AGENTS.md`
+to make it global, or in a project's own `AGENTS.md` for just that project.
 
 ## 7. Verify end to end
 
@@ -192,5 +206,7 @@ Before reporting success, confirm and report each of these:
 - [ ] `config.json` written with the user's projects; filter buttons visible
 - [ ] Skill copied to `~/.claude/skills/taskctrl/` with URL and directory filled in
 - [ ] The load-the-skill line is in `~/.claude/CLAUDE.md`
+- [ ] If Codex is in use too: skill copied to `~/.codex/skills/taskctrl/` and the line
+      is in `~/.codex/AGENTS.md`
 - [ ] A test task round-tripped through the API
 - [ ] The user has the board URL (and the LAN URL if they want it on other devices)

@@ -18,7 +18,7 @@ python3 server.py
 Most task tools assume a human clicking a UI. TASKCTRL assumes your tasks are updated by
 **both** you *and* AI coding agents (Claude Code, etc.) working on your machine: the
 storage is a human-readable JSON file, every write is available through a tiny REST API
-that agents can `curl`, and the repo ships a ready-made Claude Code skill that teaches
+that agents can `curl`, and the repo ships ready-made Claude Code and Codex skills that teach
 agents the full workflow — create a task when work starts, keep checklists current,
 write call-ready notes when it ships.
 
@@ -225,12 +225,14 @@ simply runs without project filters until you add one.
 If you use Claude Code, just ask it to set up your projects — the bundled skill knows
 the format.
 
-## Using it with Claude Code
+## Using it with Claude Code or Codex
 
 The repo ships a skill at [`.claude/skills/taskctrl/`](.claude/skills/taskctrl/SKILL.md)
 that teaches Claude Code the whole workflow: when to create tasks, how to keep subtasks
 and statuses current while working, the quality bar for notes (could you explain the
 feature to a colleague from the notes alone?), and why all writes go through the API.
+The same skill ships for Codex at [`.agents/skills/taskctrl/`](.agents/skills/taskctrl/SKILL.md)
+— identical body, only the setup block differs.
 
 - **Inside this repo** Claude Code picks the skill up automatically.
 - **From every project** — the way it's meant to be used — copy it to
@@ -241,6 +243,11 @@ feature to a colleague from the notes alone?), and why all writes go through the
 
 Without the CLAUDE.md line the skill is merely *available*; Claude will use it when it
 guesses the task is board-worthy, which is less often than you'd like.
+
+**Codex** works the same way: inside the repo it picks the skill up from
+`.agents/skills/` on its own; for every project copy it to `~/.codex/skills/taskctrl/`
+(newer builds also read `~/.agents/skills/`), fill in the same two lines, and put the
+load-the-skill line in `~/.codex/AGENTS.md` instead of CLAUDE.md.
 
 ## License
 
