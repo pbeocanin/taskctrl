@@ -132,7 +132,7 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `DELETE /api/tasks/<id>/images/<f>`  | remove an attachment                                  |
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
-| `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; 500 MB cap |
+| `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; no size cap |
 | `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `?raw=1` serves it with its real type for the rendered preview, `.html`/`.svg` behind a `Content-Security-Policy: sandbox` header; `/bench/~/a/b/file` reaches the home tree |
 | `GET /api/version`                   | self-update state: `current` · `behind` · `held` · `updating` · `error`, running commit, boot time, commits behind and their messages |
 | `POST /api/update`                   | check `origin/main` now and, if behind and clean, pull and restart (works even with auto-update off) |

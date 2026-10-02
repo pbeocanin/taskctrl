@@ -95,7 +95,6 @@ def sniff_image_ext(data):
 # ---- bench: a plain drop folder (~/bench) reachable from the board -----------
 BENCH_DIR = os.environ.get("TASKCTRL_BENCH") or os.path.expanduser("~/bench")
 HOME_DIR = os.path.expanduser("~")   # the outer root: paths starting with "~" browse the home dir
-MAX_BENCH_BYTES = 500 * 1024 * 1024
 MAX_EDIT_BYTES = 2 * 1024 * 1024     # in-place edits from the bench page (matches the preview cap)
 # dotfiles (.env, .gitignore, .config/…) are listed and editable; only pure noise and
 # the ssh keys stay out of reach by name
@@ -620,8 +619,6 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return self._json(400, {"error": "empty body — send raw file bytes"})
-        if length > MAX_BENCH_BYTES:
-            return self._json(413, {"error": "file too large (500 MB cap)"})
         name = bench_safe_name(unquote(self.headers.get("X-Filename") or ""))
         if not name:
             return self._json(400, {"error": "X-Filename header required"})
@@ -1525,7 +1522,7 @@ PAGE = r"""<!doctype html>
         <span class="bp" id="bench-path"></span>
         <button class="bback bhid" id="bench-hid" title="show / hide dotfiles">.hidden</button>
       </div>
-      <div class="dropzone" id="bench-drop">drop files anywhere<br>paste · or click to pick<br><span style="opacity:.6">any type · 500 mb cap · lands in <span id="bench-target">~/bench</span></span></div>
+      <div class="dropzone" id="bench-drop">drop files anywhere<br>paste · or click to pick<br><span style="opacity:.6">any type · lands in <span id="bench-target">~/bench</span></span></div>
       <div class="bench-prog" id="bench-prog"></div>
       <div class="bench-list" id="bench-list"></div>
     </div>
@@ -2476,10 +2473,7 @@ function uploadBenchOne(f, rel) {
 async function uploadBench(files, rel = benchCwd) {
   files = [...files];
   if (!files.length) return;
-  for (const f of files) {
-    if (f.size > 500 * 1024 * 1024) { alert(f.name + ' is over the 500 MB cap'); continue; }
-    await uploadBenchOne(f, rel);
-  }
+  for (const f of files) await uploadBenchOne(f, rel);
   await loadBench();
 }
 
