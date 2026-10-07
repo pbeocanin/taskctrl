@@ -2284,6 +2284,12 @@ try { if (localStorage.getItem('taskctrl.benchTab') === 'text') benchTab = 'text
 const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'jsonl', 'js', 'mjs', 'cjs', 'ts',
   'py', 'sh', 'bash', 'zsh', 'html', 'htm', 'css', 'svg', 'xml', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg',
   'env', 'sql', 'diff', 'patch', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'php', 'lock', 'gitignore']);
+/* text files with no telling extension: any dotfile (.env.local, .bashrc, .npmrc…) and the
+   usual extensionless names. Only the preview reads them as text — saves keep the file as is */
+const TEXT_NAMES = new Set(['makefile', 'gnumakefile', 'dockerfile', 'containerfile', 'procfile', 'gemfile',
+  'rakefile', 'vagrantfile', 'jenkinsfile', 'justfile', 'caddyfile', 'brewfile', 'license', 'licence',
+  'copying', 'readme', 'authors', 'contributors', 'changelog', 'notice', 'codeowners', 'todo']);
+const benchIsText = (name, ext) => TEXT_EXT.has(ext) || name.startsWith('.') || TEXT_NAMES.has(name.toLowerCase());
 const PREVIEW_MAX = 2 * 1024 * 1024;
 
 /* in-place editing of text-like files: null when viewing, else what the editor started from */
@@ -2324,7 +2330,7 @@ async function previewFile(name) {
   benchSetFull(benchFull);   // labels the new button
   if (!f) { body.innerHTML = '<div class="pv-empty">no such file in this folder</div>'; return; }
   if (IMG_EXT.has(ext)) { body.innerHTML = `<img class="pv-img" src="${benchUrl(benchFile, true)}" alt="${esc(benchFile)}">`; return; }
-  if (!TEXT_EXT.has(ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
+  if (!benchIsText(benchFile, ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
   if (f.size > PREVIEW_MAX) { body.innerHTML = `<div class="pv-empty">${fmtSize(f.size)} is over the 2 MB preview cap<span>${dl}</span></div>`; return; }
   body.innerHTML = '<div class="pv-empty">loading…</div>';
   const want = benchFile;
