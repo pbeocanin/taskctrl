@@ -446,6 +446,28 @@ def _update_loop():
         time.sleep(UPDATE_EVERY)
 
 
+# ---- VPN (manual-only Pritunl tunnel to the prod VPC) -------------------
+# The board shows status and can take the tunnel DOWN; it never brings it up — `vpn up`
+# needs the user's PIN + 2FA code in a terminal. Script: ~/.local/bin/vpn.
+VPN_BIN = os.path.expanduser("~/.local/bin/vpn")
+
+
+def vpn_run(*args):
+    try:
+        r = subprocess.run([VPN_BIN, *args], capture_output=True, text=True, timeout=30)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as e:  # missing script, timeout
+        return 1, str(e)
+
+
+def vpn_status():
+    code, out = vpn_run("status", "--json")
+    try:
+        return json.loads(out.splitlines()[-1])
+    except Exception:
+        return {"running": False, "error": out or f"vpn status exited {code}"}
+
+
 def update_status():
     return {**_update, "running": RUNNING_COMMIT, "boot": BOOT_TS, "autoupdate": AUTOUPDATE}
 
@@ -519,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
                              "update": {"state": u["state"], "behind": u["behind"], "detail": u["detail"], "log": u["log"]}})
         elif self.path == "/api/version":
             self._json(200, update_status())
+        elif self.path == "/api/vpn":
+            self._json(200, vpn_status())
         elif self.path == "/api/bench" or self.path.startswith("/api/bench?"):
             m = re.search(r"[?&]path=([^&]*)", self.path)
             rel = bench_safe_rel(unquote(m.group(1)) if m else "")
@@ -551,6 +575,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {**update_check(apply=True), "running": RUNNING_COMMIT, "boot": BOOT_TS})
         if self.path == "/api/bench":
             return self._bench_upload()
+        if self.path == "/api/vpn/down":
+            code, out = vpn_run("down")
+            return self._json(200 if code == 0 else 500, {**vpn_status(), "output": out})
         m = re.fullmatch(r"/api/tasks/([\w-]+)/images", self.path)
         if m:
             return self._upload_image(m.group(1))
@@ -1336,6 +1363,18 @@ PAGE = r"""<!doctype html>
   .bf .bd:hover { color: var(--cyan); text-shadow: 0 0 8px rgba(65,216,247,.6); }
   .bench-empty { padding: 20px 4px; font: 11px var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
   .console .benchbtn { align-self: center; margin-right: 10px; }
+  .console .vpnbtn { align-self: center; margin-right: 10px; display: inline-flex; align-items: center; gap: 7px; }
+  .vlamp { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .vpnbtn.up { color: var(--green); border-color: var(--green); }
+  .vpnbtn.up .vlamp, .vpn-state.up .vlamp { background: var(--green); box-shadow: 0 0 8px rgba(65,240,165,.6); }
+  .vpn-modal { max-width: 460px; }
+  .vpn-state { display: flex; align-items: center; gap: 10px; font: 700 18px var(--mono); letter-spacing: .15em; margin: 4px 0 14px; }
+  .vpn-state .vlamp { width: 11px; height: 11px; }
+  .vpn-state.up { color: var(--green); }
+  .vpn-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font: 12px var(--mono); }
+  .vpn-kv .k { color: var(--muted); }
+  .vpn-hint { font: 11px var(--mono); color: var(--muted); margin-top: 14px; line-height: 1.6; }
+  .vpn-hint code { color: var(--cyan); }
   .console .updpill { align-self: center; margin-right: 10px; color: var(--amber); border-color: var(--amber); }
   .console .updpill.err { color: var(--red); border-color: var(--red); }
   /* preview pane */
@@ -1470,6 +1509,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div class="clockbox"><span class="t" id="clock-t">--:--:--</span><span class="d" id="clock-d"></span></div>
     <button class="updpill" id="upd-pill" style="display:none"></button>
+    <button class="vpnbtn" id="vpn-btn" title="prod VPN — status / disconnect"><span class="vlamp"></span>VPN</button>
     <a class="btnlink benchbtn" id="bench-btn" href="/bench">⬡ Bench</a>
     <button class="primary" id="new-btn">+ New Task</button>
   </header>
@@ -1537,6 +1577,10 @@ PAGE = r"""<!doctype html>
 
 <div class="backdrop" id="backdrop">
   <div class="modal" id="modal"></div>
+</div>
+
+<div class="backdrop" id="vpn-bd">
+  <div class="modal vpn-modal" id="vpn-modal"></div>
 </div>
 
 <div class="lightbox" id="lightbox">
@@ -2625,6 +2669,55 @@ function showToast(e) {
   setTimeout(dismiss, 7000);
 }
 setInterval(pollEvents, 4000); pollEvents();
+
+/* ---------- VPN: status + disconnect only (connecting needs PIN + 2FA in a terminal) ---------- */
+let vpnState = null, vpnBusy = false;
+function renderVpn() {
+  const s = vpnState || {};
+  $('#vpn-btn').classList.toggle('up', !!s.running);
+  if (!$('#vpn-bd').classList.contains('show')) return;
+  const yn = v => v ? 'yes' : 'no';
+  $('#vpn-modal').innerHTML = `
+    <button class="m-close" data-vpn="close">✕</button>
+    <div class="m-head"><div class="m-id">PROD VPN · PRITUNL</div></div>
+    <div class="m-body">
+      <div class="vpn-state ${s.running ? 'up' : ''}"><span class="vlamp"></span>${vpnState ? (s.running ? 'CONNECTED' : 'DISCONNECTED') : 'CHECKING…'}</div>
+      ${s.error ? `<div class="vpn-kv"><span class="k">error</span><span>${esc(s.error)}</span></div>` : vpnState ? `
+      <div class="vpn-kv">
+        ${s.running ? `<span class="k">since</span><span>${esc(s.since)}</span><span class="k">pid</span><span>${s.pid}</span>` : ''}
+        <span class="k">${esc(s.iface || 'iface')}</span><span>${esc(s.address || '—')}</span>
+        <span class="k">prod route</span><span>${yn(s.routes_prod)}</span>
+        <span class="k">prod DB :3306</span><span>${s.db_reachable ? 'reachable' : 'unreachable'}</span>
+      </div>` : ''}
+      <div class="vpn-hint">${s.running ? 'Stays up until you disconnect it (or the VM reboots).' : 'Connect from a terminal on the VM: <code>vpn up</code> — asks for your PIN + 2FA code.'}</div>
+    </div>
+    <div class="m-foot">
+      <span class="meta">${s.output ? esc(s.output) : ''}</span>
+      <button data-vpn="refresh">Refresh</button>
+      ${s.running ? `<button class="danger" data-vpn="down" ${vpnBusy ? 'disabled' : ''}>${vpnBusy ? 'Disconnecting…' : 'Disconnect'}</button>` : ''}
+    </div>`;
+}
+async function loadVpn() {
+  try { vpnState = await api('GET', '/api/vpn'); } catch (e) { vpnState = { running: false, error: String(e.message || e) }; }
+  renderVpn();
+}
+function openVpn() { $('#vpn-bd').classList.add('show'); vpnState = vpnState || null; renderVpn(); loadVpn(); }
+function closeVpn() { $('#vpn-bd').classList.remove('show'); }
+$('#vpn-btn').addEventListener('click', openVpn);
+$('#vpn-bd').addEventListener('click', async ev => {
+  if (ev.target === $('#vpn-bd')) return closeVpn();
+  const act = ev.target.closest('[data-vpn]')?.dataset.vpn;
+  if (act === 'close') closeVpn();
+  else if (act === 'refresh') loadVpn();
+  else if (act === 'down' && !vpnBusy) {
+    vpnBusy = true; renderVpn();
+    try { vpnState = await api('POST', '/api/vpn/down'); }
+    catch (e) { vpnState = { ...(vpnState || {}), output: String(e.message || e) }; }
+    vpnBusy = false; renderVpn();
+  }
+});
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && $('#vpn-bd').classList.contains('show')) closeVpn(); });
+setInterval(loadVpn, 20000); loadVpn();
 </script>
 </body>
 </html>
