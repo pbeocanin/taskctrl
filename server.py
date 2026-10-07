@@ -945,9 +945,86 @@ PAGE = r"""<!doctype html>
   .ro.open  .v { color: var(--amber); text-shadow: 0 0 10px rgba(255,180,84,.35); }
   .ro.doing .v { color: var(--cyan);  text-shadow: 0 0 10px rgba(65,216,247,.35); }
   .ro.done  .v { color: var(--green); text-shadow: 0 0 10px rgba(65,240,165,.35); }
-  .clockbox { margin-left: auto; display: flex; flex-direction: column; justify-content: center; text-align: right; }
-  .clockbox .t { font: 700 18px var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; letter-spacing: .1em; }
-  .clockbox .d { font: 10px var(--mono); letter-spacing: .25em; color: var(--muted); }
+
+  /* ---------- HUD clock: game-style readout docked bottom-right ---------- */
+  .hudclock {
+    position: fixed; right: 18px; bottom: 18px; z-index: 90; pointer-events: none;
+    filter: drop-shadow(0 0 14px rgba(65,216,247,.22)) drop-shadow(0 10px 24px rgba(0,0,0,.6));
+    --cut: 14px;
+  }
+  .hc-frame {
+    /* 1px chamfered border: cyan gradient shell, dark panel inset by 1px */
+    padding: 1px;
+    background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-dim) 35%, var(--line2) 65%, var(--cyan) 100%);
+    clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+  }
+  .hc-panel {
+    position: relative; overflow: hidden;
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px 12px 14px;
+    background:
+      repeating-linear-gradient(0deg, rgba(65,216,247,.035) 0 1px, transparent 1px 3px),
+      radial-gradient(120% 140% at 0% 0%, rgba(65,216,247,.10), transparent 55%),
+      linear-gradient(160deg, rgba(14,23,34,.97), rgba(4,7,12,.97));
+    clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+  }
+  .hc-panel::after {  /* scanner sweep */
+    content: ""; position: absolute; left: 0; right: 0; top: -40%; height: 40%;
+    background: linear-gradient(180deg, transparent, rgba(65,216,247,.09), transparent);
+    animation: hc-sweep 4.5s linear infinite;
+  }
+  @keyframes hc-sweep { to { top: 140%; } }
+  .hc-ring { position: relative; width: 58px; height: 58px; flex: none; }
+  .hc-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+  .hc-ring circle { fill: none; }
+  .hc-track { stroke: var(--line2); stroke-width: 3; }
+  .hc-notch { stroke: var(--muted); stroke-width: 6; stroke-dasharray: 1.2 12.93; opacity: .7; }
+  .hc-sec {
+    stroke: var(--cyan); stroke-width: 3; stroke-linecap: round;
+    stroke-dasharray: 169.65; stroke-dashoffset: 169.65;
+    transition: stroke-dashoffset .35s cubic-bezier(.3,1.4,.6,1);
+    filter: drop-shadow(0 0 4px rgba(65,216,247,.9));
+  }
+  .hc-sec.wrap { transition: none; }
+  .hc-ss {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font: 700 15px var(--mono); color: var(--ink); font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 8px rgba(65,216,247,.6);
+  }
+  .hc-main { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+  .hc-label {
+    display: flex; align-items: center; gap: 7px;
+    font: 700 9px var(--mono); letter-spacing: .32em; color: var(--cyan-dim); text-transform: uppercase;
+  }
+  .hc-label .hc-tz { margin-left: auto; color: var(--amber); letter-spacing: .2em; }
+  .hc-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: hc-blink 2s ease-in-out infinite; }
+  @keyframes hc-blink { 50% { opacity: .25; box-shadow: none; } }
+  .hc-time {
+    font: 800 36px/1 var(--mono); color: var(--cyan); letter-spacing: .06em; font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 6px rgba(65,216,247,.9), 0 0 22px rgba(65,216,247,.45);
+  }
+  .hc-colon { display: inline-block; margin: 0 1px; animation: hc-colon 1s steps(1) infinite; }
+  @keyframes hc-colon { 50% { opacity: .15; } }
+  .hc-date { font: 600 10px var(--mono); letter-spacing: .26em; color: var(--dim); text-transform: uppercase; }
+  .hc-bar { display: flex; gap: 3px; margin-top: 3px; }
+  .hc-bar i {
+    flex: 1; height: 4px; background: var(--line2);
+    transform: skewX(-30deg); transition: background .3s, box-shadow .3s;
+  }
+  .hc-bar i.on { background: var(--amber); box-shadow: 0 0 6px rgba(255,180,84,.7); }
+  .hc-bar i.now { background: var(--amber); animation: hc-blink 1s steps(1) infinite; }
+  .hudclock.glitch .hc-time { animation: hc-glitch .45s steps(2) 1; }
+  @keyframes hc-glitch {
+    0%   { transform: translate(0); text-shadow: 2px 0 var(--red), -2px 0 var(--cyan); }
+    25%  { transform: translate(-2px, 1px); text-shadow: -3px 0 var(--red), 3px 0 var(--green); }
+    50%  { transform: translate(2px, -1px); text-shadow: 3px 0 var(--amber), -3px 0 var(--cyan); }
+    100% { transform: translate(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hc-panel::after, .hc-dot, .hc-colon, .hc-bar i.now { animation: none; }
+    .hudclock.glitch .hc-time { animation: none; }
+    .hc-sec { transition: none; }
+  }
+  .wrap { padding-bottom: 110px; } /* let the last rows scroll clear of the clock */
 
   /* ---------- buttons ---------- */
   button, a.btnlink {
@@ -1455,7 +1532,7 @@ PAGE = r"""<!doctype html>
   @media (max-width: 640px) {
     .row { grid-template-columns: 20px 34px 1fr auto; }
     .row .chip, .row .when, .row .prio, .row .typ { display: none; }
-    .clockbox { display: none; }
+    .hudclock { right: 10px; bottom: 10px; transform: scale(.78); transform-origin: bottom right; }
   }
   /* toasts — live feed of agent activity, docked to the right edge like a sidebar */
   .toasts {
@@ -1507,7 +1584,6 @@ PAGE = r"""<!doctype html>
       <div class="ro doing"><span class="l">ACTIVE</span><span class="v" id="ro-doing">–</span></div>
       <div class="ro done"><span class="l">COMPLETE</span><span class="v" id="ro-done">–</span></div>
     </div>
-    <div class="clockbox"><span class="t" id="clock-t">--:--:--</span><span class="d" id="clock-d"></span></div>
     <button class="updpill" id="upd-pill" style="display:none"></button>
     <button class="vpnbtn" id="vpn-btn" title="prod VPN — status / disconnect"><span class="vlamp"></span>VPN</button>
     <a class="btnlink benchbtn" id="bench-btn" href="/bench">⬡ Bench</a>
@@ -1571,6 +1647,25 @@ PAGE = r"""<!doctype html>
       <div class="pv-body" id="pv-body"></div>
     </div>
   </section>
+</div>
+
+<div class="hudclock" id="hudclock" aria-hidden="true">
+  <div class="hc-frame"><div class="hc-panel">
+    <div class="hc-ring">
+      <svg viewBox="0 0 64 64">
+        <circle class="hc-track" cx="32" cy="32" r="27"/>
+        <circle class="hc-notch" cx="32" cy="32" r="27"/>
+        <circle class="hc-sec" id="hc-sec" cx="32" cy="32" r="27"/>
+      </svg>
+      <span class="hc-ss" id="hc-ss">--</span>
+    </div>
+    <div class="hc-main">
+      <div class="hc-label"><span class="hc-dot"></span>SYS·TIME<span class="hc-tz" id="hc-tz"></span></div>
+      <div class="hc-time"><span id="hc-hh">--</span><span class="hc-colon">:</span><span id="hc-mm">--</span></div>
+      <div class="hc-date" id="hc-date"></div>
+      <div class="hc-bar" id="hc-bar"></div>
+    </div>
+  </div></div>
 </div>
 
 <div class="toasts" id="toasts"></div>
@@ -2600,12 +2695,30 @@ hudEl.addEventListener('mouseleave', () => {
   hudInner.style.removeProperty('--rx');
 });
 
-/* clock */
+/* HUD clock — bottom-right. Ring = seconds, bar = the hour in 5-minute blocks, glitch on each new minute */
+const HC_CIRC = 169.65, HC_DAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+$('#hc-bar').innerHTML = '<i></i>'.repeat(12);
+$('#hc-tz').textContent = new Intl.DateTimeFormat([], { timeZoneName: 'short' })
+  .formatToParts(new Date()).find(x => x.type === 'timeZoneName')?.value || '';
+let hcLastMin = null;
 function tick() {
   const n = new Date();
   const p = x => String(x).padStart(2, '0');
-  $('#clock-t').textContent = p(n.getHours()) + ':' + p(n.getMinutes()) + ':' + p(n.getSeconds());
-  $('#clock-d').textContent = n.toISOString().slice(0, 10);
+  const s = n.getSeconds(), m = n.getMinutes();
+  $('#hc-hh').textContent = p(n.getHours());
+  $('#hc-mm').textContent = p(m);
+  $('#hc-ss').textContent = p(s);
+  $('#hc-date').textContent = `${HC_DAYS[n.getDay()]} · ${n.getFullYear()}.${p(n.getMonth() + 1)}.${p(n.getDate())}`;
+  const ring = $('#hc-sec');
+  ring.classList.toggle('wrap', s === 0);               // snap back to empty instead of spinning backwards
+  ring.style.strokeDashoffset = HC_CIRC * (1 - (s === 0 ? 0 : s) / 60);
+  const block = Math.floor(m / 5);
+  [...$('#hc-bar').children].forEach((el, i) => { el.className = i < block ? 'on' : i === block ? 'now' : ''; });
+  if (hcLastMin !== null && m !== hcLastMin) {
+    const hc = $('#hudclock');
+    hc.classList.remove('glitch'); void hc.offsetWidth; hc.classList.add('glitch');
+  }
+  hcLastMin = m;
 }
 setInterval(tick, 1000); tick();
 
@@ -2687,7 +2800,6 @@ function renderVpn() {
         ${s.running ? `<span class="k">since</span><span>${esc(s.since)}</span><span class="k">pid</span><span>${s.pid}</span>` : ''}
         <span class="k">${esc(s.iface || 'iface')}</span><span>${esc(s.address || '—')}</span>
         <span class="k">prod route</span><span>${yn(s.routes_prod)}</span>
-        <span class="k">prod DB :3306</span><span>${s.db_reachable ? 'reachable' : 'unreachable'}</span>
       </div>` : ''}
       <div class="vpn-hint">${s.running ? 'Stays up until you disconnect it (or the VM reboots).' : 'Connect from a terminal on the VM: <code>vpn up</code> — asks for your PIN + 2FA code.'}</div>
     </div>
