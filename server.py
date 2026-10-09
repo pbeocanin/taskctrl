@@ -1555,10 +1555,10 @@ PAGE = r"""<!doctype html>
     pointer-events: auto;
     animation: toast-in .22s ease-out;
   }
-  .toast.created { border-left-color: var(--green); }
-  .toast.deleted { border-left-color: var(--red); }
-  .toast.bench { border-left-color: var(--cyan); }
-  .toast.update { border-left-color: var(--amber); }
+  .toast.ev-created { border-left-color: var(--green); }
+  .toast.ev-deleted { border-left-color: var(--red); }
+  .toast.ev-bench { border-left-color: var(--cyan); }
+  .toast.ev-update { border-left-color: var(--amber); }
   .toast .trow { display: flex; align-items: baseline; gap: 8px; }
   .toast .tn { color: var(--cyan); font-weight: 600; flex: none; }
   .toast .td { color: var(--muted); flex: none; margin-left: auto; }
@@ -1567,8 +1567,8 @@ PAGE = r"""<!doctype html>
     background: transparent; color: var(--cyan); font: 11px var(--mono); cursor: pointer;
   }
   .toast .tcopy:hover { border-color: var(--cyan); }
-  .toast.created .td { color: var(--green); }
-  .toast.deleted .td { color: var(--red); }
+  .toast.ev-created .td { color: var(--green); }
+  .toast.ev-deleted .td { color: var(--red); }
   .toast .tt {
     color: var(--ink); font-size: 13px; line-height: 1.4;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -2767,7 +2767,7 @@ function showToast(e) {
   const box = $('#toasts');
   while (box.children.length >= 5) box.firstChild.remove(); // cap the stack
   const el = document.createElement('div');
-  el.className = 'toast ' + e.action;
+  el.className = 'toast ev-' + e.action; // prefixed: a bare 'bench' class picks up the bench page's grid layout
   el.innerHTML =
     `<div class="trow">` +
       `<span class="tn">${e.action === 'bench' ? 'BENCH' : e.action === 'update' ? 'UPDATE' : 'T' + String(e.num).padStart(2, '0')}</span>` +
