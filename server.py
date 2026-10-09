@@ -1562,6 +1562,11 @@ PAGE = r"""<!doctype html>
   .toast .trow { display: flex; align-items: baseline; gap: 8px; }
   .toast .tn { color: var(--cyan); font-weight: 600; flex: none; }
   .toast .td { color: var(--muted); flex: none; margin-left: auto; }
+  .toast .tcopy {
+    flex: none; padding: 1px 7px; border: 1px solid var(--line2); border-radius: 4px;
+    background: transparent; color: var(--cyan); font: 11px var(--mono); cursor: pointer;
+  }
+  .toast .tcopy:hover { border-color: var(--cyan); }
   .toast.created .td { color: var(--green); }
   .toast.deleted .td { color: var(--red); }
   .toast .tt {
@@ -2603,7 +2608,7 @@ function uploadBenchOne(f, rel) {
       try { res = JSON.parse(xhr.responseText); } catch {}
       if (xhr.status === 201) {
         pct.textContent = 'saved as ' + res.name; bar.style.width = '100%';
-        showToast({ action: 'bench', title: res.name, detail: fmtSize(res.size) + ' → ' + benchLabel(res.path) });
+        showToast({ action: 'bench', title: res.name, detail: fmtSize(res.size) + ' → ' + benchLabel(res.path), copy: res.name, ttl: 5000 });
         setTimeout(() => row.remove(), 2500);
       } else {
         row.classList.add('err'); pct.textContent = res.error || ('HTTP ' + xhr.status);
@@ -2767,9 +2772,15 @@ function showToast(e) {
     `<div class="trow">` +
       `<span class="tn">${e.action === 'bench' ? 'BENCH' : e.action === 'update' ? 'UPDATE' : 'T' + String(e.num).padStart(2, '0')}</span>` +
       `<span class="td">${esc(e.detail || e.action)}</span>` +
+      (e.copy ? `<button class="tcopy" type="button">⧉ copy name</button>` : '') +
     `</div>` +
     `<div class="tt">${esc(e.title)}</div>`;
   const dismiss = () => { el.classList.add('out'); setTimeout(() => el.remove(), 320); };
+  if (e.copy) el.querySelector('.tcopy').onclick = ev => {
+    ev.stopPropagation(); // copying shouldn't dismiss or navigate
+    const b = ev.currentTarget;
+    b.textContent = copyText(e.copy) ? 'copied ✓' : 'copy failed';
+  };
   el.onclick = () => {
     dismiss();
     if (e.action === 'update') return;
@@ -2779,7 +2790,21 @@ function showToast(e) {
     }
   };
   box.appendChild(el);
-  setTimeout(dismiss, 7000);
+  const ttl = e.ttl || 7000;
+  let timer = setTimeout(dismiss, ttl);
+  el.onmouseenter = () => clearTimeout(timer); // hold while the pointer is on it
+  el.onmouseleave = () => { timer = setTimeout(dismiss, ttl); };
+}
+// navigator.clipboard needs a secure context, and the board is served over plain http
+function copyText(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  return ok;
 }
 setInterval(pollEvents, 4000); pollEvents();
 
