@@ -697,12 +697,32 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         sandboxed = ctype in ("text/html", "image/svg+xml", "application/xhtml+xml")
         if inline and not rendered:
-            # images keep their type; everything else is shown as plain text so an
-            # .html or .svg dropped in bench can never run scripts on the board's origin
-            if not ctype.startswith("image/") or ctype == "image/svg+xml":
+            # images and videos keep their type; everything else is shown as plain text so
+            # an .html or .svg dropped in bench can never run scripts on the board's origin
+            if not ctype.startswith(("image/", "video/")) or ctype == "image/svg+xml":
                 ctype = "text/plain; charset=utf-8"
         size = os.path.getsize(path)
-        self.send_response(200)
+        # single byte ranges (bytes=a-b, a-, -n) so the video player can seek; anything
+        # else (multi-range, junk) is ignored and the whole file goes out as a 200
+        start, end = 0, size - 1
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+        partial = bool(m and (m[1] or m[2]))
+        if partial:
+            if m[1]:
+                start = int(m[1])
+                end = min(int(m[2]), size - 1) if m[2] else size - 1
+            else:
+                start = max(size - int(m[2]), 0)
+            if start >= size or start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        self.send_response(206 if partial else 200)
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Accept-Ranges", "bytes")
         if rendered and sandboxed:
             # rendered as a real document, but inside a CSP sandbox: the page gets an
             # opaque origin, so its scripts can't read the board's storage or act on
@@ -710,14 +730,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
             ctype += "; charset=utf-8"   # a file without <meta charset> still reads right
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Length", str(end - start + 1))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Disposition",
                          ("inline" if inline or rendered else "attachment") + f"; filename*=UTF-8''{quote(name)}")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(path, "rb") as f:
-            shutil.copyfileobj(f, self.wfile)
+            f.seek(start)
+            remaining = end - start + 1
+            try:
+                while remaining:
+                    chunk = f.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # the video player drops its request whenever it seeks
 
     def _bench_save(self, raw):
         # PUT /bench/<path>: the body replaces the file's contents. Only existing
@@ -1495,6 +1525,7 @@ PAGE = r"""<!doctype html>
     display: block; max-width: 100%; height: auto; margin: 0 auto;
     background: repeating-conic-gradient(var(--panel2) 0 25%, var(--inset) 0 50%) 0 0 / 20px 20px;
   }
+  .pv-vid { max-height: 100%; background: #000; }
   .pv-body .md { font-size: 14px; }
   .pv-body .md h1 { font-size: 18px; } .pv-body .md h2 { font-size: 15px; }
   .pv-empty { display: grid; place-content: center; gap: 8px; height: 100%; min-height: 40vh; text-align: center; font: 600 10px/1.9 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
@@ -2418,9 +2449,11 @@ async function loadBench(rel = benchCwd) {
       `<a class="bd" href="${benchUrl(f.name)}" download="${esc(f.name)}" title="download">⤓</a></div>`).join('');
 }
 
-/* what the pane can show: images inline, markdown rendered, html/svg rendered in a
+/* what the pane can show: images and videos inline, markdown rendered, html/svg rendered in a
    sandboxed frame (with a text tab), anything text-like as text */
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp']);
+/* videos play in the pane; the server answers Range requests so seeking works */
+const VIDEO_EXT = new Set(['mp4', 'm4v', 'webm', 'mov']);
 const RENDER_EXT = new Set(['html', 'htm', 'svg']);
 /* which tab html/svg files open on — remembered per browser, preview by default */
 let benchTab = 'preview';
@@ -2474,6 +2507,7 @@ async function previewFile(name) {
   benchSetFull(benchFull);   // labels the new button
   if (!f) { body.innerHTML = '<div class="pv-empty">no such file in this folder</div>'; return; }
   if (IMG_EXT.has(ext)) { body.innerHTML = `<img class="pv-img" src="${benchUrl(benchFile, true)}" alt="${esc(benchFile)}">`; return; }
+  if (VIDEO_EXT.has(ext)) { body.innerHTML = `<video class="pv-img pv-vid" src="${benchUrl(benchFile, true)}" controls preload="metadata"></video>`; return; }
   if (!benchIsText(benchFile, ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
   if (f.size > PREVIEW_MAX) { body.innerHTML = `<div class="pv-empty">${fmtSize(f.size)} is over the 2 MB preview cap<span>${dl}</span></div>`; return; }
   body.innerHTML = '<div class="pv-empty">loading…</div>';
