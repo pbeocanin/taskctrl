@@ -697,9 +697,9 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         sandboxed = ctype in ("text/html", "image/svg+xml", "application/xhtml+xml")
         if inline and not rendered:
-            # images and videos keep their type; everything else is shown as plain text so
-            # an .html or .svg dropped in bench can never run scripts on the board's origin
-            if not ctype.startswith(("image/", "video/")) or ctype == "image/svg+xml":
+            # images, videos and audio keep their type; everything else is shown as plain text
+            # so an .html or .svg dropped in bench can never run scripts on the board's origin
+            if not ctype.startswith(("image/", "video/", "audio/")) or ctype == "image/svg+xml":
                 ctype = "text/plain; charset=utf-8"
         size = os.path.getsize(path)
         # single byte ranges (bytes=a-b, a-, -n) so the video player can seek; anything
@@ -1526,6 +1526,8 @@ PAGE = r"""<!doctype html>
     background: repeating-conic-gradient(var(--panel2) 0 25%, var(--inset) 0 50%) 0 0 / 20px 20px;
   }
   .pv-vid { max-height: 100%; background: #000; }
+  .pv-aud { display: grid; place-items: center; height: 100%; min-height: 40vh; }
+  .pv-aud audio { width: min(100%, 560px); }
   .pv-body .md { font-size: 14px; }
   .pv-body .md h1 { font-size: 18px; } .pv-body .md h2 { font-size: 15px; }
   .pv-empty { display: grid; place-content: center; gap: 8px; height: 100%; min-height: 40vh; text-align: center; font: 600 10px/1.9 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
@@ -2449,11 +2451,12 @@ async function loadBench(rel = benchCwd) {
       `<a class="bd" href="${benchUrl(f.name)}" download="${esc(f.name)}" title="download">⤓</a></div>`).join('');
 }
 
-/* what the pane can show: images and videos inline, markdown rendered, html/svg rendered in a
+/* what the pane can show: images, videos and audio inline, markdown rendered, html/svg rendered in a
    sandboxed frame (with a text tab), anything text-like as text */
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp']);
-/* videos play in the pane; the server answers Range requests so seeking works */
+/* videos and audio play in the pane; the server answers Range requests so seeking works */
 const VIDEO_EXT = new Set(['mp4', 'm4v', 'webm', 'mov']);
+const AUDIO_EXT = new Set(['mp3', 'm4a', 'wav', 'ogg', 'oga', 'opus', 'flac', 'aac']);
 const RENDER_EXT = new Set(['html', 'htm', 'svg']);
 /* which tab html/svg files open on — remembered per browser, preview by default */
 let benchTab = 'preview';
@@ -2507,6 +2510,7 @@ async function previewFile(name) {
   benchSetFull(benchFull);   // labels the new button
   if (!f) { body.innerHTML = '<div class="pv-empty">no such file in this folder</div>'; return; }
   if (IMG_EXT.has(ext)) { body.innerHTML = `<img class="pv-img" src="${benchUrl(benchFile, true)}" alt="${esc(benchFile)}">`; return; }
+  if (AUDIO_EXT.has(ext)) { body.innerHTML = `<div class="pv-aud"><audio src="${benchUrl(benchFile, true)}" controls preload="metadata"></audio></div>`; return; }
   if (VIDEO_EXT.has(ext)) { body.innerHTML = `<video class="pv-img pv-vid" src="${benchUrl(benchFile, true)}" controls preload="metadata"></video>`; return; }
   if (!benchIsText(benchFile, ext)) { body.innerHTML = `<div class="pv-empty">no preview for .${esc(ext || '?')} files<span>${dl}</span></div>`; return; }
   if (f.size > PREVIEW_MAX) { body.innerHTML = `<div class="pv-empty">${fmtSize(f.size)} is over the 2 MB preview cap<span>${dl}</span></div>`; return; }
