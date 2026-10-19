@@ -2341,7 +2341,7 @@ document.addEventListener('keydown', ev => {
   }
   if (BENCH_MODE && benchEdit && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') { ev.preventDefault(); benchSave(); return; }
   if (ev.key === 'Escape' && BENCH_MODE && benchEdit) { benchEditStop(); return; }
-  if (ev.key === 'Escape' && BENCH_MODE && benchFull) { benchSetFull(false); return; }
+  if (ev.key === 'Escape' && BENCH_MODE && benchFull) { benchSetFull(false); benchSyncUrl(false); return; }
   if (ev.key === 'Escape' && BENCH_MODE && benchFile) { previewFile(''); benchSyncUrl(true); return; }
   if (ev.key === 'Escape' && stEdit !== null) { stEdit = null; renderModal(); return; }
   if (ev.key === 'Escape' && modalId !== null && !editMode) closeModal();
@@ -2397,13 +2397,18 @@ const benchUrl = (name, mode) =>
   (mode === 'raw' ? '?raw=1' : mode ? '?inline=1' : '');
 const fmtWhen = m => m.replace('T', ' ').slice(0, 16);
 
-/* folder + open file live in the URL (?p=folder&f=file) so back/forward and bookmarks work */
-const benchParams = () => { const u = new URLSearchParams(location.search); return { p: u.get('p') || '', f: u.get('f') || '' }; };
+/* folder + open file live in the URL (?p=folder&f=file) so back/forward and bookmarks work;
+   a maximized pane adds &full=1 so a reload (or a shared link) comes back full-screen too */
+const benchParams = () => {
+  const u = new URLSearchParams(location.search);
+  return { p: u.get('p') || '', f: u.get('f') || '', full: u.get('full') === '1' };
+};
 function benchSyncUrl(push) {
   if (!BENCH_MODE) return;
   const u = new URLSearchParams();
   if (benchCwd) u.set('p', benchCwd);
   if (benchFile) u.set('f', benchFile);
+  if (benchFile && benchFull) u.set('full', '1');
   const url = '/bench' + (u.toString() ? '?' + u : '');
   if (url === location.pathname + location.search) return;
   const depth = (history.state?.depth || 0) + (push ? 1 : 0);
@@ -2711,16 +2716,17 @@ if (BENCH_MODE) {
   $('#bench-back').onclick = () => { if (benchLeaveOk()) location.href = '/'; };
   $('#pv-head').addEventListener('click', ev => {
     if (ev.target.closest('#pv-x')) { previewFile(''); benchSyncUrl(true); }
-    else if (ev.target.closest('#pv-full')) benchSetFull(!benchFull);
+    else if (ev.target.closest('#pv-full')) { benchSetFull(!benchFull); benchSyncUrl(false); }   // replace, not push: full/split isn't a history step
   });
   window.addEventListener('popstate', () => {
     // back/forward can't be vetoed, so an unwanted leave is undone by re-pushing where we were
     if (!benchLeaveOk()) { benchSyncUrl(true); return; }
-    const { p, f } = benchParams(); benchGo(p, f, false).catch(() => {});
+    const { p, f, full } = benchParams(); benchFull = full; benchGo(p, f, false).catch(() => {});
   });
   window.addEventListener('beforeunload', ev => { if (benchDirty()) { ev.preventDefault(); ev.returnValue = ''; } });
   // a bare /bench opens the bench root; ?p= / ?f= in the URL open a folder or file directly
-  const { p, f } = benchParams();
+  const { p, f, full } = benchParams();
+  benchFull = full;   // previewFile applies it (and drops it if there's no file to show)
   benchGo(p, f, false).catch(e => alert(e.message));
 }
 
