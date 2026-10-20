@@ -3,6 +3,15 @@
 A single-file, zero-dependency task board with a sci-fi mission-console UI — built to be
 maintained by AI agents as much as by you.
 
+- **AI-first task board** — your coding agents open, update and close tasks themselves
+  through a tiny REST API, and write notes you can read out on a call. You watch it
+  happen live.
+- **A bench for the machine's files** — drop, preview, play and edit files on the box
+  your agents run on (a VM, a home server) from any browser on your LAN. Uploads never
+  overwrite, a save never silently clobbers an agent's newer edit, dropped HTML runs
+  sandboxed, and nothing can be deleted from the browser.
+- **One file you can read** — no build, no dependencies, no database server.
+
 One Python file. Python stdlib only. One JSON file as the database. No build step, no
 npm, no docker, nothing to configure.
 
@@ -54,6 +63,9 @@ write call-ready notes when it ships.
   page itself) shows up as a toast docked to the right edge within a few seconds:
   created / updated / deleted, task number, and what changed (`→ doing`,
   `2 subtasks ✓`, `priority`…). Click a toast to open the task.
+- **Clock HUD** — a game-style clock docked bottom-right: seconds ring, glowing HH:MM,
+  date, an hour-progress bar and a small glitch on the minute. Respects
+  reduced-motion and shrinks on phones.
 - **The HUD** — on wide screens the filters dock as a 3D game-menu side panel:
   mouse-tracking tilt, staggered fly-in, holo sweep, breathing active glow, and a
   chromatic glitch on click. Flat filter rows below 1280px. Exclusive filters for
@@ -65,10 +77,14 @@ write call-ready notes when it ships.
   files render as a page by default — inside a sandboxed frame (opaque origin, so a
   dropped page's scripts can't touch the board's storage or API; sibling images and
   stylesheets in the same folder still load) — with a `preview | text` toggle that's
-  remembered per browser, and anything text-like (`.txt`, `.log`, `.csv`, `.json`,
-  `.js`, `.py`, …) shows as text; other types offer a download. Text previews stop at
+  remembered per browser, videos (`.mp4`, `.webm`, `.mov`, `.m4v`) and audio (`.mp3`, `.m4a`, `.wav`, `.ogg`,
+  `.opus`, `.flac`, `.aac`) play in the pane with seeking (the server answers byte-range
+  requests), and anything text-like (`.txt`, `.log`, `.csv`, `.json`, `.js`, `.py`, …,
+  plus any dotfile and extensionless names like `Makefile`, `Dockerfile`, `LICENSE`)
+  shows as text; other types offer a download. Text previews stop at
   2 MB. A `⛶ full` button in the pane header maximizes the pane to the whole viewport
-  with its controls intact (`esc` or `⤡ restore` brings the split view back). Any text preview has
+  with its controls intact (`esc` or `⤡ restore` brings the split view back); the
+  maximized state rides in the URL (`&full=1`), so a reload keeps it. Any text preview has
   an `✎ edit` button: the pane takes over the whole viewport as an editor, `Ctrl+S` or `save` writes the file
   back in place (only existing files, same 2 MB cap, written to a temp file and swapped
   in). A save is conditional on the file not having changed on disk since it was
@@ -86,7 +102,8 @@ write call-ready notes when it ships.
   their original name (a clash gets a `-2`, `-3` suffix, never an overwrite), or drag
   a file straight onto a folder row. Folder and open file live in the URL
   (`/bench?p=sub/folder&f=name`) so back/forward and bookmarks work; a bare `/bench`
-  opens the bench root. Real upload progress per file, a toast on arrival, and a
+  opens the bench root. Real upload progress per file, a toast on arrival (with a `⧉ copy name` button;
+  hovering any toast holds it on screen), and a
   listing sorted folders first then A→Z, with a `⤓` download link per row. Folders can't be created from
   the browser and delete is deliberately absent — those are shell jobs.
 - **Self-updating** — every install keeps itself on `origin/main`: the server fetches
@@ -100,6 +117,8 @@ write call-ready notes when it ships.
 - **REST API** — everything an agent needs, no auth, meant for localhost/LAN use
 
 ![Task view](docs/task.png)
+
+![The bench page](docs/bench.png)
 
 ![Toasts from agent activity](docs/toasts.png)
 
@@ -133,7 +152,7 @@ repo — see **[SETUP.md](SETUP.md)**, or just let Claude do it:
 | `GET /api/events?since=<seq>`        | recent mutations (in-memory, powers the toasts)       |
 | `GET /api/bench[?path=sub/folder]`   | bench folder listing (folders first, then A→Z) plus `parent`; `path=~/a/b` lists a folder under the home dir, each file carries a `stamp` for conditional saves |
 | `POST /api/bench`                    | drop a file in bench — raw bytes, name in `X-Filename` (URL-encoded), optional existing subfolder in `X-Bench-Dir`; no size cap |
-| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images as-is, everything else as `text/plain`); `?raw=1` serves it with its real type for the rendered preview, `.html`/`.svg` behind a `Content-Security-Policy: sandbox` header; `/bench/~/a/b/file` reaches the home tree |
+| `GET /bench/<path/to/file>`          | download a bench file; `?inline=1` serves it for the preview pane (images, video and audio as-is, everything else as `text/plain`); `?raw=1` serves it with its real type for the rendered preview, `.html`/`.svg` behind a `Content-Security-Policy: sandbox` header; `/bench/~/a/b/file` reaches the home tree; single byte ranges (`Range: bytes=a-b`) get a `206` so media can seek |
 | `GET /api/version`                   | self-update state: `current` · `behind` · `held` · `updating` · `error`, running commit, boot time, commits behind and their messages |
 | `POST /api/update`                   | check `origin/main` now and, if behind and clean, pull and restart (works even with auto-update off) |
 | `PUT /bench/<path/to/file>`          | overwrite an existing file with the raw body (2 MB cap, atomic); `X-Bench-Stamp: <stamp from the listing>` makes it conditional → 409 if the file changed since |
